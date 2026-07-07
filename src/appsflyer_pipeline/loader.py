@@ -1,12 +1,13 @@
-"""Database engine factory, connectivity checks, and DDL for the analytics MariaDB.
-
-Idempotent load logic (delete-by-window-then-insert) lands in Stage 4.
+"""Database engine factory, connectivity checks, DDL, and idempotent loading
+for the analytics MariaDB.
 """
 
 from __future__ import annotations
 
+import datetime
 import re
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import quote_plus
 
 from sqlalchemy import create_engine as _create_engine
@@ -121,3 +122,78 @@ def create_table(engine: Engine, table_name: str) -> None:
             conn.execute(text(ddl))
     except SQLAlchemyError as exc:
         raise PipelineError(f"Could not create table `{table_name}`: {exc}") from exc
+
+
+# Column order for INSERT — must match the keys transform.transform_events() produces.
+_INSERT_COLUMNS = (
+    "event_time",
+    "install_time",
+    "attributed_touch_time",
+    "event_name",
+    "event_revenue",
+    "media_source",
+    "channel",
+    "campaign",
+    "campaign_id",
+    "adset",
+    "adset_id",
+    "ad",
+    "ad_id",
+    "appsflyer_id",
+    "customer_user_id",
+    "attribution_type",
+    "app_id",
+)
+
+
+def load_events(
+    engine: Engine,
+    table_name: str,
+    rows: list[dict[str, Any]],
+    *,
+    app_id: str,
+    attribution_type: str,
+    start_date: datetime.date,
+    end_date: datetime.date,
+) -> int:
+    """Idempotently load one (app_id, attribution_type, date-range) partition.
+
+    Deletes any existing rows in the exact window this call owns, then bulk-
+    inserts `rows`, all inside one transaction — safe to re-run for the same
+    window (backfill chunk retries, daily re-runs) without duplicating data.
+    """
+    table_name = _validate_identifier(table_name)
+    window_start = datetime.datetime.combine(start_date, datetime.time.min)
+    window_end = datetime.datetime.combine(end_date + datetime.timedelta(days=1), datetime.time.min)
+
+    delete_stmt = text(
+        f"DELETE FROM `{table_name}` "  # noqa: S608 - table_name is validated above
+        "WHERE app_id = :app_id AND attribution_type = :attribution_type "
+        "AND event_time >= :window_start AND event_time < :window_end"
+    )
+    columns_sql = ", ".join(f"`{c}`" for c in _INSERT_COLUMNS)
+    placeholders_sql = ", ".join(f":{c}" for c in _INSERT_COLUMNS)
+    insert_stmt = text(
+        f"INSERT INTO `{table_name}` ({columns_sql}) VALUES ({placeholders_sql})"  # noqa: S608
+    )
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                delete_stmt,
+                {
+                    "app_id": app_id,
+                    "attribution_type": attribution_type,
+                    "window_start": window_start,
+                    "window_end": window_end,
+                },
+            )
+            if rows:
+                conn.execute(insert_stmt, rows)
+    except SQLAlchemyError as exc:
+        raise PipelineError(
+            f"Could not load events into `{table_name}` for app_id={app_id!r} "
+            f"attribution_type={attribution_type!r} window=[{start_date}, {end_date}]: {exc}"
+        ) from exc
+
+    return len(rows)
