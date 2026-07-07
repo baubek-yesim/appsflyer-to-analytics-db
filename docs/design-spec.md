@@ -119,6 +119,7 @@
 |---|---|---|
 | **Ticket asks for backfill from 2025-01-01, but the Pull API retains only 90 days** (Mark's comment) | AC as written is unsatisfiable via this API | **Blocking — needs stakeholder decision** (accept rolling ~90-day backfill, or source pre-90-day history from AppsFlyer Data Locker/raw export/legacy table). Pipeline built to backfill the full available window; gap is flagged, not silently dropped. |
 | AppsFlyer API rate limits / transient 5xx | Chunk pull fails mid-backfill | `tenacity` retry with exponential backoff + jitter; chunk-level isolation means a retry doesn't redo the whole backfill. |
+| **AppsFlyer's daily per-app report-download quota** (confirmed live, Stage 7: `HTTP 400 "You've reached your maximum number of in-app event reports that can be downloaded today for this app"`) | One app/attribution-type window fails for the rest of that calendar day | This is a plain 4xx, not 429/5xx, so it correctly fails fast rather than retrying (retrying would just fail again immediately). Chunk-level isolation means only the affected window is skipped — confirmed live: 11/12 windows still loaded. Fix is time, not retries: re-run just that window (`backfill --start-date/--end-date`) once the quota resets the next day. Worth keeping backfill/dry-run calls against the same app deliberately sparse within a single day. |
 | Partial load (process killed mid-run) | Inconsistent window state | Delete+insert wrapped in a single DB transaction per window/source — either fully applied or fully rolled back. |
 | Duplicate or re-attributed events on re-pull | Overcounted revenue | Delete-by-window-then-insert makes re-runs idempotent by construction. |
 | Schema drift on AppsFlyer's side (new/renamed fields) | Silent data loss or load failure | `transform.py` explicitly maps known fields only; unexpected/missing fields raise rather than silently drop (fail loud). |
@@ -139,15 +140,36 @@
 
 Mirrors the ticket, restated as testable conditions:
 
-- [ ] `check-connection` succeeds against the analytics MariaDB.
-- [ ] `create-table` creates `analytics_statistics.appsflyer_events_fb` (idempotent).
+- [x] `check-connection` succeeds against the analytics MariaDB. (Verified live, Stage 1.)
+- [x] `create-table` creates `analytics_statistics.appsflyer_events_fb` (idempotent). (Verified live,
+      Stage 2 — table already existed, schema matched.)
 - [ ] `backfill` loads the full available history (≤90 days back from yesterday) from both API sources.
-- [ ] `daily` run (via systemd timer) loads yesterday's data from both sources, unattended.
-- [ ] Rows from both sources coexist in one table, correctly tagged with `attribution_type` and `app_id`.
-- [ ] All required fields are populated; NOT NULL columns never null.
-- [ ] Row counts and revenue sums match a manual AppsFlyer UI export within tolerance.
-- [ ] Re-running `backfill` or `daily` for an already-loaded window does not duplicate rows.
-- [ ] `pytest` / `ruff` / `mypy` green in CI.
+      (First real production run, Stage 7: **11/12 windows loaded (1,285 rows)**; one window —
+      `id1458505230` retargeting, 2026-06-09..2026-07-06 — hit AppsFlyer's **daily per-app download
+      quota** for in-app event reports (HTTP 400, not a retryable 429/5xx — correctly failed fast per
+      design rather than retried) after repeated dry-run + real calls against the same app earlier the
+      same day. Chunk-level isolation worked as designed: the other 11 windows were unaffected. Pending
+      follow-up: re-run just that window once the quota resets (next day), e.g. `backfill --start-date
+      2026-06-09 --end-date 2026-07-06`. Also see `docs/RUNBOOK.md` §9 for the separate ~90-day
+      retention caveat — this loads the API's retained window, not the ticket's 2025-01-01 ask, which
+      remains open.)
+- [ ] `daily` run (via systemd timer) loads yesterday's data from both sources, unattended. (The `daily`
+      command itself is verified live — Stage 5, 136 rows — including idempotent re-runs; the systemd
+      timer wiring is written and ready in `deploy/`, Stage 7, but its first unattended fire on a real
+      server hasn't happened yet in this environment.)
+- [x] Rows from both sources coexist in one table, correctly tagged with `attribution_type` and `app_id`.
+- [x] All required fields are populated; NOT NULL columns never null.
+- [ ] Row counts and revenue sums match a manual AppsFlyer UI export within tolerance. (Not yet done —
+      needs a manual cross-check against the ticket's sample sheet / AppsFlyer UI export.)
+- [x] Re-running `backfill` or `daily` for an already-loaded window does not duplicate rows. (Verified
+      live for `daily`, Stage 5 — same run, twice, stable row count. `backfill` shares the identical
+      `load_events` delete-then-insert call per window — also covered by
+      `test_loader_integration.py::test_load_events_is_idempotent_and_isolated` against the real DB.
+      Deliberately did *not* re-run a full live `backfill` a second time just to re-prove this: it would
+      burn more of AppsFlyer's already-tight daily per-app download quota (see above) for no new
+      evidence beyond what's already proven at the unit/integration level plus `daily`'s live proof.)
+- [x] `pytest` / `ruff` / `mypy` green in CI. (68 tests, 99% branch coverage, gated at
+      `--cov-fail-under=98`; CI runs `pre-commit run --all-files` — Stage 6.)
 
 ## Rollback
 
