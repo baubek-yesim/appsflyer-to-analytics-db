@@ -74,4 +74,11 @@ matching the stage numbering below.
    `--cov-fail-under=98` in CI only); CI's lint/format/type steps consolidated into one
    `pre-commit run --all-files` step so the pre-commit config is continuously verified instead of
    sitting unexercised
-7. Server deploy (systemd unit+timer, RUNBOOK, first backfill)
+7. Server deploy (systemd unit+timer, RUNBOOK, first backfill) — artifacts done:
+   `deploy/appsflyer-daily.{service,timer}` + `deploy/appsflyer.env.example` + `docs/RUNBOOK.md`
+   (systemd + `uv` interaction, EnvironmentFile format, security hardening, troubleshooting all
+   documented — not yet applied to a real server in this environment). First backfill run live
+   against production: 11/12 windows loaded (1,285 rows); one window hit AppsFlyer's daily per-app
+   download quota (a real, expected 4xx per the design's rate-limit risk mitigation, not a bug) —
+   pending a scoped retry once the quota resets. See `docs/design-spec.md`'s Acceptance Criteria and
+   Risks for full detail.

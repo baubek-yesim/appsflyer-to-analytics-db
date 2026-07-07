@@ -45,5 +45,8 @@ uv run pytest                # tests (unit + respx-mocked HTTP; mysql:8 service 
 
 ## Deployment
 
-Runs unattended on a CLI-only server via a systemd timer — see [`docs/RUNBOOK.md`](docs/RUNBOOK.md)
-(added in Stage 7) for install, scheduling, and first-backfill steps.
+Runs unattended on a CLI-only server via a systemd timer (`deploy/appsflyer-daily.service` +
+`deploy/appsflyer-daily.timer`, no Docker): a dedicated system user builds the venv with `uv sync`,
+secrets live in a mode-600 `EnvironmentFile` (`deploy/appsflyer.env.example` is the template), and the
+timer fires `appsflyer-pipeline daily` once a day. Full install, scheduling, verification, and
+first-backfill steps: [`docs/RUNBOOK.md`](docs/RUNBOOK.md).

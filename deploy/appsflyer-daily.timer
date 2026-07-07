@@ -1,0 +1,33 @@
+[Unit]
+Description=Schedule the daily AppsFlyer -> analytics DB load (BAF-2)
+Documentation=https://yesimapp.atlassian.net/browse/BAF-2
+
+[Timer]
+# Evaluated in the server's LOCAL timezone (per `timedatectl`/`/etc/localtime`),
+# NOT UTC, unless the server itself is set to UTC. 05:00 local gives AppsFlyer
+# a few hours' margin to finalize "yesterday's" data before the pull runs.
+#
+# run_daily() computes "yesterday" from the server's local date (see
+# pipeline.py's _today() seam) -- so the meaning of "yesterday" follows
+# whatever timezone this server is set to. Align the server tz with the
+# reporting timezone you care about, or consciously accept UTC.
+#
+# To pin a specific timezone regardless of the server's own tz (systemd >=
+# 252), append an IANA name or UTC to the expression instead, e.g.:
+#   OnCalendar=*-*-* 05:00:00 Europe/Amsterdam
+#   OnCalendar=*-*-* 05:00:00 UTC
+OnCalendar=*-*-* 05:00:00
+
+# If the server was down at 05:00, run as soon as possible after the next boot
+# instead of silently skipping that day.
+Persistent=true
+
+# Light jitter so the pull isn't always on-the-dot (API politeness); the job
+# actually fires sometime in [05:00, 05:05).
+RandomizedDelaySec=300
+AccuracySec=1min
+
+Unit=appsflyer-daily.service
+
+[Install]
+WantedBy=timers.target

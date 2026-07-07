@@ -1,0 +1,85 @@
+[Unit]
+Description=AppsFlyer -> analytics DB daily incremental load (BAF-2)
+Documentation=https://yesimapp.atlassian.net/browse/BAF-2
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Deliberately no RemainAfterExit: a timer-triggered oneshot must return to
+# "inactive" when it finishes. Setting RemainAfterExit=yes here would leave
+# the unit "active (exited)", and the next timer fire would then see it as
+# already active and silently no-op -- the daily run would just stop
+# happening. See docs/RUNBOOK.md.
+
+# --- Identity: dedicated, non-login system account ---
+User=appsflyer
+Group=appsflyer
+WorkingDirectory=/opt/appsflyer/appsflyer-to-analytics-db
+
+# --- Secrets ---
+# systemd reads this file as root (PID 1) at unit-setup time, before dropping
+# to User=, so ProtectSystem=strict below does not block it. No leading '-':
+# the run must fail loudly if the secrets file is missing, not skip silently.
+EnvironmentFile=/etc/appsflyer/appsflyer.env
+
+# Flush stdout to journald promptly; skip .pyc writes into a read-only tree.
+Environment=PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+
+# --- What to run ---
+# The venv's console script has an absolute shebang into this host's venv
+# python, so this needs no PATH lookup, no login shell, and no `uv` at
+# runtime (unlike `uv run`, which would re-check/re-sync uv.lock on every
+# invocation -- fragile under the sandbox below, and `uv` itself may not be
+# on systemd's minimal PATH). See docs/RUNBOOK.md for the full rationale.
+ExecStart=/opt/appsflyer/appsflyer-to-analytics-db/.venv/bin/appsflyer-pipeline daily
+# Bulletproof alternative if the install path is ever deep enough that the
+# shebang line exceeds the kernel's 127-byte limit ("bad interpreter"):
+# ExecStart=/opt/appsflyer/appsflyer-to-analytics-db/.venv/bin/python -m appsflyer_pipeline.cli daily
+
+# AppsFlyer export generation + tenacity retry/backoff can take several
+# minutes; the systemd default (~90s) would SIGTERM a healthy run.
+TimeoutStartSec=1800
+
+# --- Logging -> journald ---
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=appsflyer-daily
+
+# --- Security hardening ---
+# Each directive below is safe for this job (outbound HTTPS to AppsFlyer,
+# outbound TCP to MariaDB, read its own venv, write nothing to disk -- logs
+# go to journald). Deliberately NOT hardened with IPAddressAllow/Deny:
+# AppsFlyer resolves to rotating CDN IPs and 302-redirects hq1.appsflyer.com
+# to rawdata.appsflyer.com, so IP allow-listing would be brittle and break
+# real pulls.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+# MemoryDenyWriteExecute=true  # optional, strongest -- enable only after a
+#   successful test run; some native extensions (polars, pymysql C bits)
+#   can dislike W^X. See docs/RUNBOOK.md troubleshooting.
+
+# No [Install] section on purpose: appsflyer-daily.timer is what gets
+# enabled. Adding WantedBy= here and enabling this .service directly would
+# make it *also* run on every boot, in addition to the daily timer.
