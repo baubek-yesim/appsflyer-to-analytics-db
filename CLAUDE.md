@@ -24,7 +24,7 @@ uv run mypy                  # type check (strict)
 uv run pytest                # unit + respx-mocked HTTP + live-DB integration tests (auto-skip if unreachable)
 uv run appsflyer-pipeline check-connection   # verify DB connectivity
 uv run appsflyer-pipeline create-table       # idempotent DDL
-uv run appsflyer-pipeline backfill|daily     # (Stage 5)
+uv run appsflyer-pipeline backfill|daily     # --dry-run, --start-date/--end-date/--date overrides
 ```
 
 CI (`.github/workflows/ci.yml`) runs the same lint/type/test commands against a `mysql:8` service
@@ -62,7 +62,10 @@ matching the stage numbering below.
 2. Target table DDL + `create-table` — done, verified live (table already existed, schema matched)
 3. AppsFlyer API client (hybrid from Mark's reference scripts) — done, verified live against the
    real API (surfaced two real bugs: httpx needs `follow_redirects=True`, unlike `requests`)
-4. Transform + idempotent loader — next
-5. Orchestration + CLI (`backfill`/`daily`, `--dry-run`)
+4. Transform + idempotent loader — done, verified live end-to-end (fetch -> transform -> load ->
+   idempotent re-load) against production
+5. Orchestration + CLI (`backfill`/`daily`, `--dry-run`, `--start-date`/`--end-date`/`--date`) —
+   done, verified live: a real `daily` run loaded 136 rows, re-running was idempotent (still 136),
+   dry-run previews never write
 6. Tests + CI green
 7. Server deploy (systemd unit+timer, RUNBOOK, first backfill)

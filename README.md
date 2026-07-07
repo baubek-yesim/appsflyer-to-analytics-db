@@ -20,13 +20,19 @@ uv run pre-commit install   # optional: run lint/format/type checks on every com
 ## Usage
 
 ```bash
-uv run appsflyer-pipeline check-connection   # verify DB connectivity          (Stage 1)
-uv run appsflyer-pipeline create-table       # create the target table        (Stage 2)
-uv run appsflyer-pipeline backfill           # one-time historical load        (Stage 5)
-uv run appsflyer-pipeline daily              # yesterday's incremental load    (Stage 5)
+uv run appsflyer-pipeline check-connection   # verify DB connectivity
+uv run appsflyer-pipeline create-table       # create the target table (idempotent)
+uv run appsflyer-pipeline backfill           # historical load: full available window (<=90 days)
+uv run appsflyer-pipeline daily              # yesterday's incremental load
 ```
 
 Add `--dry-run` to `backfill`/`daily` to preview row counts without writing to the database.
+
+`backfill` accepts `--start-date`/`--end-date` (ISO `YYYY-MM-DD`) to override the default 90-day
+window — e.g. to re-run a specific gap, or to probe what AppsFlyer actually returns for dates older
+than its 90-day retention floor (see the "Known open issue" in `CLAUDE.md`). `daily` accepts `--date`
+to replay a single missed day. Both loads are idempotent per `(app_id, attribution_type, window)`, so
+re-running any of these is always safe.
 
 ## Development
 
