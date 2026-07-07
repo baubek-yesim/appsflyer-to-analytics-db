@@ -10,6 +10,7 @@ from tenacity import wait_none
 from appsflyer_pipeline import appsflyer_client
 from appsflyer_pipeline.appsflyer_client import (
     AppsFlyerAPIError,
+    AttributionType,
     _fetch_csv,
     _is_retryable,
     chunk_date_range,
@@ -102,6 +103,37 @@ def test_fetch_events_sends_expected_params_and_headers() -> None:
     assert request.url.params["event_name"] == "af_purchase,af_purchase_YC"
     assert request.url.params["media_source"] == "Facebook Ads"
     assert request.headers["Authorization"] == "Bearer secret-token"
+
+
+@respx.mock
+def test_fetch_events_never_sends_additional_fields() -> None:
+    """Dual attribution (issue #7): the `Is Primary Attribution` column that
+    transform.py filters on is a STANDARD v5 export column. Requesting it via
+    `additional_fields=is_primary_attribution` gets HTTP 400 "Unknown
+    additional field" from the real API (verified live, 2026-07-07) — this
+    pins the request shape so that regression can't quietly come back.
+    """
+    ua_route = respx.get(_url("id123", "non_organic")).mock(
+        return_value=httpx.Response(200, text=SAMPLE_CSV)
+    )
+    rt_route = respx.get(_url("id123", "retargeting")).mock(
+        return_value=httpx.Response(200, text=SAMPLE_CSV)
+    )
+    attribution_types: tuple[AttributionType, ...] = ("non_organic", "retargeting")
+    with httpx.Client() as client:
+        for attribution_type in attribution_types:
+            fetch_events(
+                client,
+                app_id="id123",
+                attribution_type=attribution_type,
+                from_date=datetime.date(2026, 5, 20),
+                to_date=datetime.date(2026, 5, 20),
+                api_token="token",
+                media_source="Facebook Ads",
+                event_names=["af_purchase"],
+            )
+    for route in (ua_route, rt_route):
+        assert "additional_fields" not in route.calls.last.request.url.params
 
 
 @respx.mock

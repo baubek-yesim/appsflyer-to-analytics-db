@@ -71,6 +71,11 @@ def _fetch_csv(
         "event_name": ",".join(event_names),
         "media_source": media_source,
     }
+    # Dual attribution (issue #7): the "Is Primary Attribution" column that
+    # transform.py filters on is a STANDARD column of the v5 export (position
+    # 77 of 81 in the live response) — do NOT request it via
+    # `additional_fields=is_primary_attribution`; the API rejects that with
+    # HTTP 400 "Unknown additional field" (verified live, 2026-07-07).
     headers = {
         "Authorization": f"Bearer {api_token}",
         "Accept": "text/csv",
