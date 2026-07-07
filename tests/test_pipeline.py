@@ -18,9 +18,9 @@ from appsflyer_pipeline.pipeline import _iter_work_items, run_backfill, run_dail
 SAMPLE_CSV = (
     "Attributed Touch Time,Install Time,Event Time,Event Name,Event Revenue,"
     "Media Source,Channel,Campaign,Campaign ID,Adset,Adset ID,Ad,Ad ID,"
-    "AppsFlyer ID,Customer User ID\n"
+    "AppsFlyer ID,Customer User ID,Is Primary Attribution\n"
     "2026-05-20 10:00:00,2026-05-19 09:00:00,2026-05-20 10:05:00,af_purchase,9.99,"
-    "Facebook Ads,Social,Summer Sale,cmp-1,Adset A,adset-1,Ad A,ad-1,af-id-1,user-1\n"
+    "Facebook Ads,Social,Summer Sale,cmp-1,Adset A,adset-1,Ad A,ad-1,af-id-1,user-1,true\n"
 )
 MISSING_COLUMN_CSV = "Event Name\naf_purchase\n"
 

@@ -25,6 +25,7 @@ RAW_COLUMNS = [
     "Ad ID",
     "AppsFlyer ID",
     "Customer User ID",
+    "Is Primary Attribution",
     "Region",  # an extra raw column we don't care about, matching the real ~81-column response
 ]
 
@@ -47,6 +48,7 @@ def _raw_row(**overrides: str | None) -> dict[str, str | None]:
         "Ad ID": "ad-1",
         "AppsFlyer ID": "af-id-1",
         "Customer User ID": "user-1",
+        "Is Primary Attribution": "true",
         "Region": "EU",
     }
     row.update(overrides)
@@ -171,6 +173,85 @@ def test_transform_raises_on_unparseable_revenue() -> None:
 def test_transform_raises_on_unparseable_timestamp() -> None:
     df = _df([_raw_row(**{"Event Time": "not-a-timestamp"})])
     with pytest.raises(TransformError, match="timestamp"):
+        transform_events(
+            df,
+            attribution_type="non_organic",
+            app_id="id1458505230",
+            media_source_filter="Facebook Ads",
+            event_names_filter=["af_purchase"],
+        )
+
+
+def test_transform_drops_non_primary_rows_for_non_organic() -> None:
+    """Dual attribution (issue #7): a retargeting-attributed event also appears in
+    the UA report as a secondary copy, flagged `Is Primary Attribution = false`.
+    Those copies are delivered as primary in the retargeting report, so the UA
+    (non_organic) pull must drop them to avoid double-counting revenue.
+    """
+    df = _df(
+        [
+            _raw_row(**{"AppsFlyer ID": "af-primary", "Is Primary Attribution": "true"}),
+            _raw_row(**{"AppsFlyer ID": "af-secondary", "Is Primary Attribution": "false"}),
+        ]
+    )
+    rows = transform_events(
+        df,
+        attribution_type="non_organic",
+        app_id="id1458505230",
+        media_source_filter="Facebook Ads",
+        event_names_filter=["af_purchase", "af_purchase_YC"],
+    )
+    assert [r["appsflyer_id"] for r in rows] == ["af-primary"]
+
+
+def test_transform_flag_values_are_case_insensitive() -> None:
+    df = _df(
+        [
+            _raw_row(**{"AppsFlyer ID": "af-1", "Is Primary Attribution": "True"}),
+            _raw_row(**{"AppsFlyer ID": "af-2", "Is Primary Attribution": "FALSE"}),
+        ]
+    )
+    rows = transform_events(
+        df,
+        attribution_type="non_organic",
+        app_id="id1458505230",
+        media_source_filter="Facebook Ads",
+        event_names_filter=["af_purchase"],
+    )
+    assert [r["appsflyer_id"] for r in rows] == ["af-1"]
+
+
+def test_transform_does_not_filter_or_require_flag_for_retargeting() -> None:
+    """The retargeting report is the primary record for re-engagement events —
+    no flag is requested there and no rows are dropped, even if the column is absent.
+    """
+    df = _df([_raw_row()]).drop("Is Primary Attribution")
+    rows = transform_events(
+        df,
+        attribution_type="retargeting",
+        app_id="id1458505230",
+        media_source_filter="Facebook Ads",
+        event_names_filter=["af_purchase"],
+    )
+    assert len(rows) == 1
+
+
+def test_transform_requires_flag_column_for_non_organic() -> None:
+    df = _df([_raw_row()]).drop("Is Primary Attribution")
+    with pytest.raises(TransformError, match="missing expected column"):
+        transform_events(
+            df,
+            attribution_type="non_organic",
+            app_id="id1458505230",
+            media_source_filter="Facebook Ads",
+            event_names_filter=["af_purchase"],
+        )
+
+
+@pytest.mark.parametrize("bad_value", ["yes", "1", "", None])
+def test_transform_raises_on_unexpected_flag_value(bad_value: str | None) -> None:
+    df = _df([_raw_row(**{"Is Primary Attribution": bad_value})])
+    with pytest.raises(TransformError, match="Is Primary Attribution"):
         transform_events(
             df,
             attribution_type="non_organic",

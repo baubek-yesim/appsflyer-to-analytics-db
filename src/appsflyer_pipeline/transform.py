@@ -41,6 +41,12 @@ _COLUMN_MAP: dict[str, str] = {
 _TIMESTAMP_COLUMNS = ("event_time", "install_time", "attributed_touch_time")
 _REQUIRED_NOT_NULL = ("event_time", "event_name", "appsflyer_id")
 
+# Dual attribution (issue #7): a standard column of the v5 export (present in
+# the live 81-column response; must NOT be requested via additional_fields —
+# see appsflyer_client._fetch_csv). Not loaded into the table; used to drop
+# secondary copies of retargeting-attributed events from the UA pull.
+_PRIMARY_ATTRIBUTION_COLUMN = "Is Primary Attribution"
+
 
 class TransformError(RuntimeError):
     """Raised when raw AppsFlyer data doesn't match the expected shape."""
@@ -77,16 +83,38 @@ def transform_events(
     Re-applies the media-source/event-name filters client-side (defense in
     depth on top of the API's own `media_source`/`event_name` request params)
     and adds `attribution_type`/`app_id`, which AppsFlyer's export doesn't know.
+
+    For `non_organic` chunks, also drops rows where `Is Primary Attribution`
+    is false: those are secondary copies of retargeting-attributed events that
+    the retargeting pull already delivers as primary (issue #7 — loading both
+    double-counts revenue).
     """
     if df.is_empty():
         return []
 
-    missing = [raw for raw in _COLUMN_MAP if raw not in df.columns]
+    required_raw = list(_COLUMN_MAP)
+    if attribution_type == "non_organic":
+        required_raw.append(_PRIMARY_ATTRIBUTION_COLUMN)
+    missing = [raw for raw in required_raw if raw not in df.columns]
     if missing:
         raise TransformError(
             f"AppsFlyer response is missing expected column(s): {missing} "
             f"(attribution_type={attribution_type}, app_id={app_id})"
         )
+
+    if attribution_type == "non_organic":
+        # Drop secondary copies of retargeting-attributed events (dual
+        # attribution, issue #7) — they arrive as primary rows in the
+        # retargeting report, so keeping them here double-counts revenue.
+        flag = pl.col(_PRIMARY_ATTRIBUTION_COLUMN).str.strip_chars().str.to_lowercase()
+        invalid = df.filter(flag.is_null() | ~flag.is_in(["true", "false"]))
+        if invalid.height:
+            bad_values = invalid.get_column(_PRIMARY_ATTRIBUTION_COLUMN).unique().head(5).to_list()
+            raise TransformError(
+                f"Unexpected {_PRIMARY_ATTRIBUTION_COLUMN!r} value(s): {bad_values} "
+                f"(attribution_type={attribution_type}, app_id={app_id})"
+            )
+        df = df.filter(flag.eq("true"))
 
     filtered = df.filter(
         pl.col("Media Source").eq(media_source_filter)
