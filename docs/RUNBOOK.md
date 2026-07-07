@@ -11,6 +11,14 @@ Placeholders used throughout — adjust to your environment:
 | service user | `appsflyer` | dedicated, non-login system account the job runs as |
 | install dir | `/opt/appsflyer/appsflyer-to-analytics-db` | where the repo is cloned + venv built |
 | secrets file | `/etc/appsflyer/appsflyer.env` | mode-600 systemd `EnvironmentFile` |
+| deploy user (no-root stopgap, §14) | `<deploy-user>` | existing personal account used when root isn't available yet |
+
+> **Current live status (2026-07-07):** the pipeline is deployed and running on the target analytics
+> server — but via the **no-root stopgap** in §14 below, not the root-based setup §§1-13 describe.
+> `<deploy-user>` doesn't have sudo on that box yet (a request is in with the backend team); everything
+> below this point assumes root is available. Read §14 first if you're picking this up before that's
+> resolved. (Real host/access details for this deployment are kept out of this public repo — ask
+> whoever owns BAF-2 if you need them.)
 
 ## 0. Overview
 
@@ -205,16 +213,19 @@ sudo systemd-run --wait --pty --collect --unit=appsflyer-probe \
 Record the observed behavior (empty windows vs. errors) in the BAF-2 ticket to help close the open
 question.
 
-> **Daily download quota — confirmed live.** AppsFlyer caps how many in-app event reports can be
-> downloaded *per app, per calendar day*. A backfill spans many chunks × apps × attribution types, so
-> running `--dry-run` and then the real load back-to-back against the same app can exhaust that
-> app's quota partway through the real run (observed: `HTTP 400 "You've reached your maximum number
-> of in-app event reports that can be downloaded today for this app"`). This is a plain 4xx, so the
-> client correctly does **not** retry it — retrying immediately would just fail again. Chunk-level
-> isolation means the rest of the backfill still completes; only the exhausted window(s) fail. Do not
-> immediately re-run the whole backfill to "fix" this — wait for the quota to reset (next day) and
-> re-run just the failed window(s) with `--start-date`/`--end-date`. If you must minimize API calls
-> during a first backfill, skip the `--dry-run` preview and go straight to the real load.
+> **Daily download quota — confirmed live, twice.** AppsFlyer caps how many in-app event reports can be
+> downloaded per `(app_id, attribution_type)` combo per calendar day — empirically around 6-7
+> downloads before it trips (observed: `HTTP 400 "You've reached your maximum number of in-app event
+> reports that can be downloaded today for this app"`). A backfill alone spans many chunks × apps ×
+> attribution types, so running `--dry-run` and then the real load back-to-back can exhaust it
+> partway through the real run; layering manual preflight/verification calls on top (as in §14) can
+> exhaust it for *additional* combos beyond what the backfill itself touched. This is a plain 4xx, so
+> the client correctly does **not** retry it — retrying immediately just fails again. Chunk-level
+> isolation means the rest of the run still completes; only the exhausted combo(s) fail. Do not
+> immediately re-run the whole backfill/daily to "fix" this — wait for the quota to reset (next day)
+> and re-run just the failed window(s) with `--start-date`/`--end-date`. If you must minimize API
+> calls during a first backfill or verification pass, skip `--dry-run` previews and go straight to the
+> real call, and avoid re-running the same app/attribution combo more than once or twice in a day.
 
 ## 10. Monitoring (day-to-day)
 
@@ -272,3 +283,76 @@ sudo -u appsflyer --login bash -c '
 ```
 If the unit files themselves changed, re-run §7's `install` + `daemon-reload`. No explicit "restart"
 is needed otherwise — it's a oneshot; the next timer fire automatically uses the updated venv.
+
+## 14. No-root stopgap deployment (what's actually live right now)
+
+`<deploy-user>` has no sudo on the target server as of 2026-07-07 — `sudo -n true` prompts for a
+password, and the account isn't in the `sudo` group (a request to be added is in with the backend
+team). §§1-13 above need root for the dedicated system user, `/etc/systemd/system/`, and
+`/etc/appsflyer/`. Until that's granted, the pipeline runs as a **systemd `--user` (per-user manager)**
+deployment instead — functionally equivalent, but scoped entirely to `<deploy-user>`'s own account
+with no root anywhere. This is what's actually installed and running today.
+
+**What differs from §§1-13:**
+
+| | Root-based (§§1-13) | No-root stopgap (this section) |
+|---|---|---|
+| Runs as | dedicated `appsflyer` system user | `<deploy-user>` (existing personal account) |
+| Install dir | `/opt/appsflyer/appsflyer-to-analytics-db` | `~/GitHubRepos/appsflyer-to-analytics-db` |
+| Secrets file | `/etc/appsflyer/appsflyer.env` (mode 600) | `~/appsflyer-secrets/appsflyer.env` (mode 600, **outside** the git working directory — never inside the repo clone, to rule out an accidental `git add -A` ever sweeping real credentials into this public repo) |
+| Units live in | `/etc/systemd/system/`, managed by the system manager | `~/.config/systemd/user/`, managed by `systemctl --user` |
+| Unit files | `deploy/appsflyer-daily.{service,timer}` | `deploy/user-level/appsflyer-daily.{service,timer}` |
+| Runs without login? | always (system manager) | only with `loginctl enable-linger <deploy-user>` (done — see below; this itself needed no root) |
+| Hardening | full set incl. `ProtectHome=true`/`ProtectSystem=strict` | reduced — `ProtectHome`/`ProtectSystem=strict` are dropped, since they'd hide `/home` entirely, which is where the repo/venv/secrets all live for a per-user deployment |
+
+**Install steps actually run** (uv installed user-locally, no root needed anywhere):
+```bash
+git clone https://github.com/baubek-yesim/appsflyer-to-analytics-db.git ~/GitHubRepos/appsflyer-to-analytics-db
+curl -LsSf https://astral.sh/uv/install.sh | sh          # installs to ~/.local/bin, no root
+cd ~/GitHubRepos/appsflyer-to-analytics-db && ~/.local/bin/uv sync --frozen --no-dev
+
+mkdir -p ~/appsflyer-secrets && chmod 700 ~/appsflyer-secrets
+# .env copied in via scp from a machine that already had it configured, then:
+chmod 600 ~/appsflyer-secrets/appsflyer.env
+
+mkdir -p ~/.config/systemd/user
+# deploy/user-level/appsflyer-daily.{service,timer} copied to ~/.config/systemd/user/
+systemctl --user daemon-reload
+
+loginctl enable-linger "$(whoami)"   # exit 0, no root needed -- self-linger is polkit-allowed here
+systemctl --user enable --now appsflyer-daily.timer
+```
+
+**Verified live through this exact path** (2026-07-07): `check-connection` via a transient
+`systemd-run --user` unit connected successfully and confirmed the table has 1,397 rows;
+`daily --dry-run` via the same mechanism correctly parsed the `EnvironmentFile` (including the
+space in `APPSFLYER_MEDIA_SOURCE=Facebook Ads` and the comma-separated `APPSFLYER_APP_IDS`) and made
+real AppsFlyer API calls. 2 of 4 windows in that dry-run hit AppsFlyer's daily per-app quota (see the
+refined note in §9 — heavy same-day testing across dry-runs, the real backfill, and this verification
+had already spent most of that quota for 2 of the 4 app/attribution combos); the other 2 succeeded
+end-to-end. `appsflyer-daily.service` itself was never manually started (to avoid spending more of an
+already-thin quota) — its **first real fire is the scheduled one**, `2026-07-08` around `05:00`
+server-local time (confirmed via `systemctl --user list-timers`).
+
+**Preflight/verification commands** — identical to §6/§8's `systemd-run` pattern, minus `--property=User=`/
+`Group=` (meaningless for a user-manager unit) and with the no-root paths substituted:
+```bash
+systemd-run --user --wait --collect --unit=appsflyer-preflight \
+  --property=WorkingDirectory=$HOME/GitHubRepos/appsflyer-to-analytics-db \
+  --property=EnvironmentFile=$HOME/appsflyer-secrets/appsflyer.env \
+  --property=StandardOutput=journal \
+  $HOME/GitHubRepos/appsflyer-to-analytics-db/.venv/bin/appsflyer-pipeline check-connection
+journalctl --user -u appsflyer-preflight.service -o cat --no-pager
+```
+Monitoring: `systemctl --user list-timers appsflyer-daily.timer`, `journalctl --user -u
+appsflyer-daily.service`. Rollback: `systemctl --user disable --now appsflyer-daily.timer`.
+
+**Migrating to the root-based setup once sudo lands:** install per §§2-7 as normal (dedicated
+`appsflyer` system user, `/opt/appsflyer/...`, `/etc/appsflyer/...`), verify it end-to-end exactly like
+this section did, *then* tear down the stopgap so the job isn't running twice:
+```bash
+systemctl --user disable --now appsflyer-daily.timer
+loginctl disable-linger "$(whoami)"
+rm -rf ~/.config/systemd/user/appsflyer-daily.{service,timer} ~/appsflyer-secrets
+# ~/GitHubRepos/appsflyer-to-analytics-db can stay as a dev clone, or be removed too
+```

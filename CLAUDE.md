@@ -74,11 +74,16 @@ matching the stage numbering below.
    `--cov-fail-under=98` in CI only); CI's lint/format/type steps consolidated into one
    `pre-commit run --all-files` step so the pre-commit config is continuously verified instead of
    sitting unexercised
-7. Server deploy (systemd unit+timer, RUNBOOK, first backfill) — artifacts done:
-   `deploy/appsflyer-daily.{service,timer}` + `deploy/appsflyer.env.example` + `docs/RUNBOOK.md`
-   (systemd + `uv` interaction, EnvironmentFile format, security hardening, troubleshooting all
-   documented — not yet applied to a real server in this environment). First backfill run live
-   against production: 11/12 windows loaded (1,285 rows); one window hit AppsFlyer's daily per-app
-   download quota (a real, expected 4xx per the design's rate-limit risk mitigation, not a bug) —
-   pending a scoped retry once the quota resets. See `docs/design-spec.md`'s Acceptance Criteria and
-   Risks for full detail.
+7. Server deploy (systemd unit+timer, RUNBOOK, first backfill) — **live** on the target analytics
+   server, but via a **no-root `systemd --user` stopgap** (`deploy/user-level/`, `docs/RUNBOOK.md`
+   §14) — the deploy account has no sudo on that box yet, a request is in with the backend team. Real
+   host/access details are kept out of this public repo — see whoever owns BAF-2. Once granted,
+   migrate to the canonical root-based setup
+   (`deploy/appsflyer-daily.{service,timer}`, §§1-13). Daily timer is enabled and armed (first
+   scheduled fire: 2026-07-08 ~05:00 +03); `check-connection`/`daily --dry-run` verified live through
+   the real systemd path. First backfill run live against production: 11/12 windows loaded
+   (1,285 rows); a couple of (app_id, attribution_type) combos have since hit AppsFlyer's daily
+   report-download quota (~6-7 downloads/day per combo, confirmed empirically — a real, expected 4xx
+   per the design's rate-limit risk mitigation, not a bug) from the cumulative testing today — pending
+   scoped retries once the quota resets. See `docs/design-spec.md`'s Acceptance Criteria and Risks,
+   and `docs/RUNBOOK.md` §14, for full detail.
