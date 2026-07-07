@@ -37,14 +37,8 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras --dev
 
-      - name: Lint (ruff check)
-        run: uv run ruff check .
-
-      - name: Format check (ruff format)
-        run: uv run ruff format --check .
-
-      - name: Type check (mypy)
-        run: uv run mypy
+      - name: Lint + format + type check (pre-commit)
+        run: uv run pre-commit run --all-files
 
       - name: Test (pytest)
         env:
@@ -56,4 +50,4 @@ jobs:
           DB_TABLE: appsflyer_purchase_events
           APPSFLYER_API_TOKEN: test-token
           APPSFLYER_APP_IDS: id1458505230
-        run: uv run pytest
+        run: uv run pytest --cov-fail-under=98

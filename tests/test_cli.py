@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import datetime
+
 import httpx
 import pytest
 import respx
 from typer.testing import CliRunner
 
+from appsflyer_pipeline import cli
 from appsflyer_pipeline.cli import app
 from appsflyer_pipeline.config import get_settings
+from appsflyer_pipeline.loader import ConnectionStatus, PipelineError
+from appsflyer_pipeline.pipeline import RunSummary
 
 runner = CliRunner()
 
@@ -56,6 +61,61 @@ def test_check_connection_reports_failure_for_unreachable_db(
     get_settings.cache_clear()
 
     result = runner.invoke(app, ["check-connection"])
+
+    get_settings.cache_clear()
+    assert result.exit_code == 1
+    assert "FAILED" in result.output
+
+
+@pytest.mark.parametrize(
+    ("table_exists", "row_count", "expected_fragment"),
+    [
+        (True, 42, "exists (42 rows)"),
+        (False, None, "does not exist yet"),
+    ],
+)
+def test_check_connection_reports_status_for_both_branches(
+    monkeypatch: pytest.MonkeyPatch,
+    table_exists: bool,
+    row_count: int | None,
+    expected_fragment: str,
+) -> None:
+    _set_cli_env(monkeypatch)
+    monkeypatch.setattr(
+        cli,
+        "check_connection",
+        lambda engine, table_name: ConnectionStatus(
+            server_version="8.0.35", table_exists=table_exists, row_count=row_count
+        ),
+    )
+
+    result = runner.invoke(app, ["check-connection"])
+
+    get_settings.cache_clear()
+    assert result.exit_code == 0
+    assert expected_fragment in result.output
+
+
+def test_create_table_success_reports_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_cli_env(monkeypatch)
+    monkeypatch.setattr(cli, "create_table", lambda engine, table_name: None)
+
+    result = runner.invoke(app, ["create-table"])
+
+    get_settings.cache_clear()
+    assert result.exit_code == 0
+    assert "is ready." in result.output
+
+
+def test_create_table_reports_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_cli_env(monkeypatch)
+
+    def _raise(engine: object, table_name: str) -> None:
+        raise PipelineError(f"Could not create table `{table_name}`: boom")
+
+    monkeypatch.setattr(cli, "create_table", _raise)
+
+    result = runner.invoke(app, ["create-table"])
 
     get_settings.cache_clear()
     assert result.exit_code == 1
@@ -149,3 +209,55 @@ def test_daily_dry_run_success_exits_zero(monkeypatch: pytest.MonkeyPatch) -> No
     get_settings.cache_clear()
     assert result.exit_code == 0
     assert "Would load" in result.output
+
+
+@respx.mock
+def test_daily_partial_failure_exits_one_with_fail_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_cli_env(monkeypatch)
+    respx.get(_af_url("app1", "non_organic")).mock(
+        return_value=httpx.Response(200, text=SAMPLE_CSV)
+    )
+    respx.get(_af_url("app1", "retargeting")).mock(return_value=httpx.Response(401, text="nope"))
+
+    result = runner.invoke(app, ["daily", "--date", "2026-05-20", "--dry-run"])
+
+    get_settings.cache_clear()
+    assert result.exit_code == 1
+    assert "FAIL" in result.output
+
+
+def test_backfill_start_after_end_reports_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both dates are valid ISO, so CLI-level parsing succeeds; run_backfill()
+    itself raises ValueError("start ... is after end ...") before touching the
+    network or DB -- distinct from test_backfill_invalid_start_date_fails_fast,
+    which covers the CLI-level date-parsing failure instead.
+    """
+    _set_cli_env(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        ["backfill", "--start-date", "2026-05-20", "--end-date", "2026-05-01"],
+    )
+
+    get_settings.cache_clear()
+    assert result.exit_code == 1
+    assert "FAILED" in result.output
+
+
+def test_daily_reports_failure_when_run_daily_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """run_daily()'s only non-ValueError raise is the missing-table preflight
+    PipelineError; isolate it directly rather than standing up a real (fake)
+    unreachable DB + non-dry-run path just to reach the same except clause.
+    """
+    _set_cli_env(monkeypatch)
+
+    def _raise(*, date: datetime.date | None, dry_run: bool) -> RunSummary:
+        raise PipelineError("Target table `some_table` does not exist yet")
+
+    monkeypatch.setattr(cli, "run_daily", _raise)
+
+    result = runner.invoke(app, ["daily", "--date", "2026-05-20"])
+
+    get_settings.cache_clear()
+    assert result.exit_code == 1
+    assert "FAILED" in result.output

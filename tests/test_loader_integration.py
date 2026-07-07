@@ -34,6 +34,24 @@ def test_check_connection_reports_server_version_and_table_status() -> None:
     assert isinstance(status.table_exists, bool)
 
 
+def test_check_connection_reports_missing_table() -> None:
+    """A fabricated, never-created table name -- read-only (information_schema
+    lookup only), so this is safe against the real production DB too, and it's
+    the only place the table_exists=False branch is exercised against a real
+    server (the other check_connection tests all hit the real target table,
+    which already exists in every environment this suite runs in).
+    """
+    try:
+        settings = get_settings()
+        engine = create_engine(settings)
+        status = check_connection(engine, "__pytest_definitely_missing_table__")
+    except Exception as exc:  # noqa: BLE001 - environment without a reachable/configured DB
+        pytest.skip(f"no usable database in this environment: {exc}")
+
+    assert status.table_exists is False
+    assert status.row_count is None
+
+
 def test_create_table_is_idempotent() -> None:
     try:
         settings = get_settings()

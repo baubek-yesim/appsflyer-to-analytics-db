@@ -7,9 +7,11 @@ import pytest
 import respx
 from tenacity import wait_none
 
+from appsflyer_pipeline import appsflyer_client
 from appsflyer_pipeline.appsflyer_client import (
     AppsFlyerAPIError,
     _fetch_csv,
+    _is_retryable,
     chunk_date_range,
     fetch_events,
 )
@@ -161,6 +163,54 @@ def test_fetch_csv_retries_on_5xx_then_succeeds() -> None:
         )
     assert route.call_count == 3
     assert b"af_purchase" in content
+
+
+@respx.mock
+def test_fetch_events_wraps_transport_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A network-level failure (not an HTTP error response) is retried (it's a
+    TransportError, retryable per _is_retryable) and, on exhaustion, wrapped
+    into AppsFlyerAPIError. wait_none() keeps this fast — without it, 4 real
+    exponential-jitter sleeps add up to ~15s before the reraise.
+    """
+    monkeypatch.setattr(
+        appsflyer_client,
+        "_fetch_csv",
+        appsflyer_client._fetch_csv.retry_with(wait=wait_none()),  # type: ignore[attr-defined]
+    )
+    route = respx.get(_url("id123", "non_organic")).mock(side_effect=httpx.ConnectError("boom"))
+
+    with httpx.Client() as client, pytest.raises(AppsFlyerAPIError, match="Network failure"):
+        fetch_events(
+            client,
+            app_id="id123",
+            attribution_type="non_organic",
+            from_date=datetime.date(2026, 5, 20),
+            to_date=datetime.date(2026, 5, 20),
+            api_token="token",
+            media_source="Facebook Ads",
+            event_names=["af_purchase"],
+        )
+    assert route.call_count == 5  # stop_after_attempt(5), all exhausted
+
+
+def _status_error(status_code: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("GET", "https://example.com")
+    response = httpx.Response(status_code, request=request)
+    return httpx.HTTPStatusError("error", request=request, response=response)
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (httpx.ConnectError("boom"), True),
+        (_status_error(500), True),
+        (_status_error(429), True),
+        (_status_error(401), False),
+        (ValueError("not an httpx error"), False),
+    ],
+)
+def test_is_retryable_matrix(exc: BaseException, expected: bool) -> None:
+    assert _is_retryable(exc) is expected
 
 
 def test_chunk_date_range_splits_into_max_31_day_windows() -> None:
