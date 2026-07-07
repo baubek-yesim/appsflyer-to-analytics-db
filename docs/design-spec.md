@@ -119,7 +119,7 @@
 |---|---|---|
 | **Ticket asks for backfill from 2025-01-01, but the Pull API retains only 90 days** (Mark's comment) | AC as written is unsatisfiable via this API | **Blocking — needs stakeholder decision** (accept rolling ~90-day backfill, or source pre-90-day history from AppsFlyer Data Locker/raw export/legacy table). Pipeline built to backfill the full available window; gap is flagged, not silently dropped. |
 | AppsFlyer API rate limits / transient 5xx | Chunk pull fails mid-backfill | `tenacity` retry with exponential backoff + jitter; chunk-level isolation means a retry doesn't redo the whole backfill. |
-| **AppsFlyer's daily per-app report-download quota** (confirmed live, Stage 7: `HTTP 400 "You've reached your maximum number of in-app event reports that can be downloaded today for this app"`) | One app/attribution-type window fails for the rest of that calendar day | This is a plain 4xx, not 429/5xx, so it correctly fails fast rather than retrying (retrying would just fail again immediately). Chunk-level isolation means only the affected window is skipped — confirmed live: 11/12 windows still loaded. Fix is time, not retries: re-run just that window (`backfill --start-date/--end-date`) once the quota resets the next day. Worth keeping backfill/dry-run calls against the same app deliberately sparse within a single day. |
+| **AppsFlyer's daily report-download quota** (confirmed live, Stage 7: `HTTP 400 "You've reached your maximum number of in-app event reports that can be downloaded today for this app"`) | One (app_id, attribution_type) combo fails for the rest of that calendar day | This is a plain 4xx, not 429/5xx, so it correctly fails fast rather than retrying (retrying would just fail again immediately). Chunk-level isolation means only the affected combo is skipped — confirmed live twice (Stage 7): 11/12 backfill windows still loaded, and separately 2/4 `daily` windows. The quota appears to trip per (app_id, attribution_type) after roughly 6-7 report downloads in a single day — heavy same-day testing (dry-run previews *and* real runs *and* manual preflight checks, all against the same app/attribution pairs) exhausts it fast. Fix is time, not retries: re-run just the affected window(s) (`backfill --start-date/--end-date`) once the quota resets the next day. Operational takeaway: during any first-time or heavy manual testing, prefer going straight to a real (non-dry-run) call over a dry-run-then-real pair, and avoid re-running the same window/app repeatedly within one day. |
 | Partial load (process killed mid-run) | Inconsistent window state | Delete+insert wrapped in a single DB transaction per window/source — either fully applied or fully rolled back. |
 | Duplicate or re-attributed events on re-pull | Overcounted revenue | Delete-by-window-then-insert makes re-runs idempotent by construction. |
 | Schema drift on AppsFlyer's side (new/renamed fields) | Silent data loss or load failure | `transform.py` explicitly maps known fields only; unexpected/missing fields raise rather than silently drop (fail loud). |
@@ -154,9 +154,12 @@ Mirrors the ticket, restated as testable conditions:
       retention caveat — this loads the API's retained window, not the ticket's 2025-01-01 ask, which
       remains open.)
 - [ ] `daily` run (via systemd timer) loads yesterday's data from both sources, unattended. (The `daily`
-      command itself is verified live — Stage 5, 136 rows — including idempotent re-runs; the systemd
-      timer wiring is written and ready in `deploy/`, Stage 7, but its first unattended fire on a real
-      server hasn't happened yet in this environment.)
+      command itself is verified live — Stage 5, 136 rows — including idempotent re-runs. The timer is
+      now deployed and armed on the target server (as a no-root `systemd --user` stopgap —
+      see `docs/RUNBOOK.md` §14 — pending a sudo grant to migrate to the canonical root-based setup in
+      §§1-13), and `check-connection`/`daily --dry-run` were verified live through that exact systemd
+      path. Its first *unattended, scheduled* fire is `2026-07-08` ~05:00 — not yet observed as of this
+      writing.)
 - [x] Rows from both sources coexist in one table, correctly tagged with `attribution_type` and `app_id`.
 - [x] All required fields are populated; NOT NULL columns never null.
 - [ ] Row counts and revenue sums match a manual AppsFlyer UI export within tolerance. (Not yet done —

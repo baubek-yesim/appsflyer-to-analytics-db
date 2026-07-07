@@ -1,0 +1,43 @@
+[Unit]
+Description=AppsFlyer -> analytics DB daily incremental load (BAF-2) [user-level stopgap, no root]
+Documentation=https://yesimapp.atlassian.net/browse/BAF-2
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# See docs/RUNBOOK.md for why RemainAfterExit stays off on a timer-triggered oneshot.
+
+WorkingDirectory=%h/GitHubRepos/appsflyer-to-analytics-db
+EnvironmentFile=%h/appsflyer-secrets/appsflyer.env
+Environment=PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+
+ExecStart=%h/GitHubRepos/appsflyer-to-analytics-db/.venv/bin/appsflyer-pipeline daily
+
+TimeoutStartSec=1800
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=appsflyer-daily
+
+# Reduced hardening vs. ../appsflyer-daily.service: this is a systemd --user
+# (per-user manager) unit, run without root -- see docs/RUNBOOK.md's
+# "No-root stopgap deployment" section for why and when to retire this.
+# ProtectHome/ProtectSystem=strict are intentionally omitted here: they would
+# hide /home entirely, which is where the repo, venv, and secrets file live
+# for a per-user deployment.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+UMask=0077
+
+# No [Install] section here either -- the .timer pulls this in.

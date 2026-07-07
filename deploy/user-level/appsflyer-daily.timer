@@ -1,0 +1,13 @@
+[Unit]
+Description=Schedule the daily AppsFlyer -> analytics DB load (BAF-2) [user-level stopgap]
+Documentation=https://yesimapp.atlassian.net/browse/BAF-2
+
+[Timer]
+OnCalendar=*-*-* 05:00:00
+Persistent=true
+RandomizedDelaySec=300
+AccuracySec=1min
+Unit=appsflyer-daily.service
+
+[Install]
+WantedBy=timers.target
