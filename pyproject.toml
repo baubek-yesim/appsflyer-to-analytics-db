@@ -53,7 +53,13 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--cov=appsflyer_pipeline --cov-report=term-missing"
+addopts = "--cov --cov-report=term-missing"
 
 [tool.coverage.run]
-source = ["src/appsflyer_pipeline"]
+branch = true
+source_pkgs = ["appsflyer_pipeline"]
+
+[tool.coverage.report]
+exclude_also = [
+    "if __name__ == .__main__.:",
+]

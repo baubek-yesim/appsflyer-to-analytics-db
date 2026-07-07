@@ -11,8 +11,15 @@ repos:
     hooks:
       - id: mypy
         additional_dependencies:
+          - httpx
+          - polars
           - pydantic-settings
+          - pytest
+          - respx
+          - sqlalchemy
+          - tenacity
           - types-pymysql
+          - typer
         args: [--config-file=pyproject.toml]
         pass_filenames: false
         files: ^(src|tests)/

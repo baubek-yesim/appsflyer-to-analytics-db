@@ -114,6 +114,7 @@ def test_transform_handles_blank_optional_fields_as_none() -> None:
                     "Install Time": None,
                     "Attributed Touch Time": "",
                     "Customer User ID": None,
+                    "Event Revenue": "",
                 }
             )
         ]
@@ -128,6 +129,7 @@ def test_transform_handles_blank_optional_fields_as_none() -> None:
     assert rows[0]["install_time"] is None
     assert rows[0]["attributed_touch_time"] is None
     assert rows[0]["customer_user_id"] is None
+    assert rows[0]["event_revenue"] is None
 
 
 def test_transform_raises_on_missing_required_raw_column() -> None:
@@ -157,6 +159,18 @@ def test_transform_raises_on_blank_required_field() -> None:
 def test_transform_raises_on_unparseable_revenue() -> None:
     df = _df([_raw_row(**{"Event Revenue": "not-a-number"})])
     with pytest.raises(TransformError, match="event_revenue"):
+        transform_events(
+            df,
+            attribution_type="non_organic",
+            app_id="id1458505230",
+            media_source_filter="Facebook Ads",
+            event_names_filter=["af_purchase"],
+        )
+
+
+def test_transform_raises_on_unparseable_timestamp() -> None:
+    df = _df([_raw_row(**{"Event Time": "not-a-timestamp"})])
+    with pytest.raises(TransformError, match="timestamp"):
         transform_events(
             df,
             attribution_type="non_organic",

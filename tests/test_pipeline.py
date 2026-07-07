@@ -12,7 +12,7 @@ import respx
 from appsflyer_pipeline import pipeline
 from appsflyer_pipeline.appsflyer_client import MAX_RETENTION_DAYS
 from appsflyer_pipeline.config import get_settings
-from appsflyer_pipeline.loader import ConnectionStatus
+from appsflyer_pipeline.loader import ConnectionStatus, PipelineError
 from appsflyer_pipeline.pipeline import _iter_work_items, run_backfill, run_daily
 
 SAMPLE_CSV = (
@@ -266,3 +266,27 @@ def test_run_daily_defaults_to_yesterday(
         summary = run_daily(dry_run=True)
 
     assert all(r.start_date == expected and r.end_date == expected for r in summary.results)
+
+
+def test_run_window_raises_when_table_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-dry-run call preflights the table's existence -- overrides the
+    autouse _stub_preflight fixture's table_exists=True default (this
+    setattr, being called later, wins; teardown correctly unwinds both).
+    """
+    _set_env(monkeypatch)
+    monkeypatch.setattr(
+        pipeline,
+        "check_connection",
+        lambda engine, table_name: ConnectionStatus(
+            server_version="test", table_exists=False, row_count=None
+        ),
+    )
+
+    with pytest.raises(PipelineError, match="does not exist"):
+        run_daily(date=datetime.date(2026, 5, 20), dry_run=False)
+
+
+def test_today_returns_a_real_date() -> None:
+    # Every other test monkeypatches _today(); this exercises its actual body once.
+    # Avoid asserting == datetime.date.today() to sidestep midnight-rollover flakiness.
+    assert isinstance(pipeline._today(), datetime.date)

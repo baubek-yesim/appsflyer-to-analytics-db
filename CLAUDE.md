@@ -21,14 +21,17 @@ uv sync                      # install/update deps into .venv
 uv run ruff check .          # lint
 uv run ruff format .         # format
 uv run mypy                  # type check (strict)
+uv run pre-commit run --all-files   # same checks CI gates on — run before pushing
 uv run pytest                # unit + respx-mocked HTTP + live-DB integration tests (auto-skip if unreachable)
 uv run appsflyer-pipeline check-connection   # verify DB connectivity
 uv run appsflyer-pipeline create-table       # idempotent DDL
 uv run appsflyer-pipeline backfill|daily     # --dry-run, --start-date/--end-date/--date overrides
 ```
 
-CI (`.github/workflows/ci.yml`) runs the same lint/type/test commands against a `mysql:8` service
-container. `.pre-commit-config.yaml` mirrors ruff+mypy locally.
+CI (`.github/workflows/ci.yml`) runs `uv run pre-commit run --all-files` (ruff + ruff-format + mypy,
+the same hooks as local `.pre-commit-config.yaml`) then `pytest --cov-fail-under=98` against a
+`mysql:8` service container — a hook that breaks pre-commit breaks CI with it, so the config can't
+silently rot.
 
 ## Conventions
 
@@ -67,5 +70,8 @@ matching the stage numbering below.
 5. Orchestration + CLI (`backfill`/`daily`, `--dry-run`, `--start-date`/`--end-date`/`--date`) —
    done, verified live: a real `daily` run loaded 136 rows, re-running was idempotent (still 136),
    dry-run previews never write
-6. Tests + CI green
+6. Tests + CI green — done: 68 tests, 99% branch coverage (`branch = true`, gated at
+   `--cov-fail-under=98` in CI only); CI's lint/format/type steps consolidated into one
+   `pre-commit run --all-files` step so the pre-commit config is continuously verified instead of
+   sitting unexercised
 7. Server deploy (systemd unit+timer, RUNBOOK, first backfill)
