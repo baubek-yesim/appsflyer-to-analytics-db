@@ -1,0 +1,182 @@
+from __future__ import annotations
+
+import datetime
+
+import httpx
+import pytest
+import respx
+from tenacity import wait_none
+
+from appsflyer_pipeline.appsflyer_client import (
+    AppsFlyerAPIError,
+    _fetch_csv,
+    chunk_date_range,
+    fetch_events,
+)
+
+SAMPLE_CSV = (
+    "Attributed Touch Time,Install Time,Event Time,Event Name,Event Revenue,"
+    "Media Source,Campaign,AppsFlyer ID,Customer User ID\n"
+    "2026-05-20 10:00:00,2026-05-19 09:00:00,2026-05-20 10:05:00,af_purchase,9.99,"
+    "Facebook Ads,Summer Sale,af-id-1,user-1\n"
+)
+
+
+def _url(app_id: str, attribution_type: str) -> str:
+    endpoint = (
+        "in_app_events_report" if attribution_type == "non_organic" else "in-app-events-retarget"
+    )
+    return f"https://hq1.appsflyer.com/api/raw-data/export/app/{app_id}/{endpoint}/v5"
+
+
+@respx.mock
+def test_fetch_events_parses_csv() -> None:
+    route = respx.get(_url("id123", "non_organic")).mock(
+        return_value=httpx.Response(200, text=SAMPLE_CSV)
+    )
+    with httpx.Client() as client:
+        df = fetch_events(
+            client,
+            app_id="id123",
+            attribution_type="non_organic",
+            from_date=datetime.date(2026, 5, 20),
+            to_date=datetime.date(2026, 5, 20),
+            api_token="token",
+            media_source="Facebook Ads",
+            event_names=["af_purchase", "af_purchase_YC"],
+        )
+    assert route.called
+    assert df.shape[0] == 1
+    assert "Event Name" in df.columns
+    assert df["Event Name"][0] == "af_purchase"
+
+
+@respx.mock
+def test_fetch_events_follows_redirect_to_rawdata_domain() -> None:
+    """AppsFlyer 302-redirects hq1.appsflyer.com to a signed rawdata.appsflyer.com
+    URL to deliver the actual export; httpx does not follow redirects by default
+    (unlike requests, which Mark's original scripts relied on), so this must be
+    handled explicitly — confirmed against the real API during Stage 3.
+    """
+    redirect_url = "https://rawdata.appsflyer.com/export/token/abc123"
+    respx.get(_url("id123", "non_organic")).mock(
+        return_value=httpx.Response(302, headers={"location": redirect_url})
+    )
+    respx.get(redirect_url).mock(return_value=httpx.Response(200, text=SAMPLE_CSV))
+
+    with httpx.Client() as client:
+        df = fetch_events(
+            client,
+            app_id="id123",
+            attribution_type="non_organic",
+            from_date=datetime.date(2026, 5, 20),
+            to_date=datetime.date(2026, 5, 20),
+            api_token="token",
+            media_source="Facebook Ads",
+            event_names=["af_purchase"],
+        )
+    assert df.shape[0] == 1
+
+
+@respx.mock
+def test_fetch_events_sends_expected_params_and_headers() -> None:
+    route = respx.get(_url("id123", "retargeting")).mock(
+        return_value=httpx.Response(200, text=SAMPLE_CSV)
+    )
+    with httpx.Client() as client:
+        fetch_events(
+            client,
+            app_id="id123",
+            attribution_type="retargeting",
+            from_date=datetime.date(2026, 5, 1),
+            to_date=datetime.date(2026, 5, 20),
+            api_token="secret-token",
+            media_source="Facebook Ads",
+            event_names=["af_purchase", "af_purchase_YC"],
+        )
+    request = route.calls.last.request
+    assert request.url.params["from"] == "2026-05-01"
+    assert request.url.params["to"] == "2026-05-20"
+    assert request.url.params["event_name"] == "af_purchase,af_purchase_YC"
+    assert request.url.params["media_source"] == "Facebook Ads"
+    assert request.headers["Authorization"] == "Bearer secret-token"
+
+
+@respx.mock
+def test_fetch_events_empty_body_returns_empty_dataframe() -> None:
+    respx.get(_url("id123", "non_organic")).mock(return_value=httpx.Response(200, text=""))
+    with httpx.Client() as client:
+        df = fetch_events(
+            client,
+            app_id="id123",
+            attribution_type="non_organic",
+            from_date=datetime.date(2026, 5, 20),
+            to_date=datetime.date(2026, 5, 20),
+            api_token="token",
+            media_source="Facebook Ads",
+            event_names=["af_purchase"],
+        )
+    assert df.is_empty()
+
+
+@respx.mock
+def test_fetch_events_raises_on_client_error_without_retry() -> None:
+    route = respx.get(_url("id123", "non_organic")).mock(
+        return_value=httpx.Response(401, text="unauthorized")
+    )
+    with httpx.Client() as client, pytest.raises(AppsFlyerAPIError, match="401"):
+        fetch_events(
+            client,
+            app_id="id123",
+            attribution_type="non_organic",
+            from_date=datetime.date(2026, 5, 20),
+            to_date=datetime.date(2026, 5, 20),
+            api_token="token",
+            media_source="Facebook Ads",
+            event_names=["af_purchase"],
+        )
+    assert route.call_count == 1
+
+
+@respx.mock
+def test_fetch_csv_retries_on_5xx_then_succeeds() -> None:
+    route = respx.get(_url("id123", "non_organic")).mock(
+        side_effect=[
+            httpx.Response(500, text="server error"),
+            httpx.Response(500, text="server error"),
+            httpx.Response(200, text=SAMPLE_CSV),
+        ]
+    )
+    fast_fetch = _fetch_csv.retry_with(wait=wait_none())  # type: ignore[attr-defined]
+    with httpx.Client() as client:
+        content = fast_fetch(
+            client,
+            app_id="id123",
+            attribution_type="non_organic",
+            from_date=datetime.date(2026, 5, 20),
+            to_date=datetime.date(2026, 5, 20),
+            api_token="token",
+            media_source="Facebook Ads",
+            event_names=["af_purchase"],
+        )
+    assert route.call_count == 3
+    assert b"af_purchase" in content
+
+
+def test_chunk_date_range_splits_into_max_31_day_windows() -> None:
+    chunks = chunk_date_range(datetime.date(2026, 1, 1), datetime.date(2026, 3, 31))
+    assert all((end - start).days < 31 for start, end in chunks)
+    assert chunks[0][0] == datetime.date(2026, 1, 1)
+    assert chunks[-1][1] == datetime.date(2026, 3, 31)
+    for (_, prev_end), (next_start, _) in zip(chunks, chunks[1:], strict=False):
+        assert next_start == prev_end + datetime.timedelta(days=1)
+
+
+def test_chunk_date_range_single_day() -> None:
+    chunks = chunk_date_range(datetime.date(2026, 5, 20), datetime.date(2026, 5, 20))
+    assert chunks == [(datetime.date(2026, 5, 20), datetime.date(2026, 5, 20))]
+
+
+def test_chunk_date_range_rejects_inverted_range() -> None:
+    with pytest.raises(ValueError, match="after"):
+        chunk_date_range(datetime.date(2026, 5, 20), datetime.date(2026, 5, 1))
