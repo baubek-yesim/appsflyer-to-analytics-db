@@ -12,9 +12,10 @@ from __future__ import annotations
 import datetime
 
 import typer
+from pydantic import ValidationError
 
 from appsflyer_pipeline import __version__
-from appsflyer_pipeline.config import get_settings
+from appsflyer_pipeline.config import Settings, get_settings
 from appsflyer_pipeline.loader import PipelineError, check_connection, create_engine, create_table
 from appsflyer_pipeline.logging_config import configure_logging
 from appsflyer_pipeline.pipeline import RunSummary, run_backfill, run_daily
@@ -46,7 +47,7 @@ def version() -> None:
 @app.command(name="check-connection")
 def check_connection_command() -> None:
     """Verify connectivity to the analytics MariaDB and report the target table's status."""
-    settings = get_settings()
+    settings = _get_settings_or_exit()
     engine = create_engine(settings)
     try:
         status = check_connection(engine, settings.db_table)
@@ -64,7 +65,7 @@ def check_connection_command() -> None:
 @app.command(name="create-table")
 def create_table_command() -> None:
     """Create the target table if it doesn't already exist (idempotent)."""
-    settings = get_settings()
+    settings = _get_settings_or_exit()
     engine = create_engine(settings)
     try:
         create_table(engine, settings.db_table)
@@ -76,9 +77,10 @@ def create_table_command() -> None:
 
 
 def _parse_optional_date(value: str | None, flag_name: str) -> datetime.date | None:
-    """Tightly-scoped date parsing — only catches the fromisoformat ValueError,
-    so a real config error (e.g. pydantic.ValidationError from get_settings(),
-    which does NOT subclass ValueError) is never accidentally swallowed here.
+    """Tightly-scoped date parsing — only catches the fromisoformat ValueError.
+    A real config error (e.g. pydantic.ValidationError from get_settings()) is
+    a different exception path entirely: it's raised inside
+    _get_settings_or_exit, never here.
     """
     if value is None:
         return None
@@ -88,6 +90,18 @@ def _parse_optional_date(value: str | None, flag_name: str) -> datetime.date | N
         typer.echo(
             f"FAILED: invalid {flag_name} {value!r}: must be an ISO date (YYYY-MM-DD)", err=True
         )
+        raise typer.Exit(code=1) from exc
+
+
+def _get_settings_or_exit() -> Settings:
+    """Load settings, rendering a bad/missing env var as a clean FAILED message
+    (issue #12) instead of an uncaught pydantic ValidationError traceback --
+    the same treatment every command already gives a PipelineError.
+    """
+    try:
+        return get_settings()
+    except ValidationError as exc:
+        typer.echo(f"FAILED: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
 
@@ -128,7 +142,7 @@ def backfill(
 
     try:
         summary = run_backfill(start, end, dry_run=dry_run)
-    except (PipelineError, ValueError) as exc:
+    except (PipelineError, ValidationError) as exc:
         typer.echo(f"FAILED: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
@@ -158,7 +172,7 @@ def daily(
 
     try:
         summary = run_daily(date=target_date, dry_run=dry_run)
-    except (PipelineError, ValueError) as exc:
+    except (PipelineError, ValidationError) as exc:
         typer.echo(f"FAILED: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 

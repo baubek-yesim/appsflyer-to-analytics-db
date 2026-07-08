@@ -253,7 +253,7 @@ def run_backfill(
     start = start or default_start
 
     if start > end:
-        raise ValueError(f"start {start} is after end {end}")
+        raise PipelineError(f"start {start} is after end {end}")
     if start < default_start:
         logger.warning(
             "Requested backfill start %s is earlier than the AppsFlyer Pull API's "

@@ -229,7 +229,7 @@ def test_run_backfill_default_window_is_90_days(
 
 def test_run_backfill_rejects_start_after_end(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_env(monkeypatch)
-    with pytest.raises(ValueError, match="after"):
+    with pytest.raises(PipelineError, match="after"):
         run_backfill(start=datetime.date(2026, 5, 20), end=datetime.date(2026, 5, 1))
 
 

@@ -122,6 +122,30 @@ def test_create_table_reports_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "FAILED" in result.output
 
 
+def test_check_connection_reports_config_error_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #12: a bad/missing env var must fail the same clean way as
+    backfill/daily (FAILED: ... + exit 1), not an uncaught pydantic
+    ValidationError traceback.
+    """
+    _set_cli_env(monkeypatch, APPSFLYER_APP_IDS="")
+
+    result = runner.invoke(app, ["check-connection"])
+
+    get_settings.cache_clear()
+    assert result.exit_code == 1
+    assert "FAILED" in result.output
+
+
+def test_create_table_reports_config_error_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_cli_env(monkeypatch, APPSFLYER_APP_IDS="")
+
+    result = runner.invoke(app, ["create-table"])
+
+    get_settings.cache_clear()
+    assert result.exit_code == 1
+    assert "FAILED" in result.output
+
+
 @respx.mock
 def test_backfill_dry_run_success_exits_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_cli_env(monkeypatch)
@@ -228,8 +252,8 @@ def test_daily_partial_failure_exits_one_with_fail_line(monkeypatch: pytest.Monk
 
 def test_backfill_start_after_end_reports_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """Both dates are valid ISO, so CLI-level parsing succeeds; run_backfill()
-    itself raises ValueError("start ... is after end ...") before touching the
-    network or DB -- distinct from test_backfill_invalid_start_date_fails_fast,
+    itself raises PipelineError("start ... is after end ...") before touching
+    the network or DB -- distinct from test_backfill_invalid_start_date_fails_fast,
     which covers the CLI-level date-parsing failure instead.
     """
     _set_cli_env(monkeypatch)
