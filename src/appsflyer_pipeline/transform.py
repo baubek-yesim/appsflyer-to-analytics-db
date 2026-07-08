@@ -83,7 +83,10 @@ def _dedupe_rows(
     comment 62585) — neither column can differ within a single call. Rows
     sharing the key but disagreeing on any other field raise: that means the
     key's uniqueness assumption doesn't hold for this data and needs a human,
-    not a silent pick.
+    not a silent pick. A raised error fails only the current
+    (app_id, attribution_type, chunk) window via _process_window's isolation —
+    not the whole run — but that window's load is skipped entirely until the
+    conflict is resolved, same as any other TransformError.
     """
     seen: dict[tuple[Any, Any, Any], dict[str, Any]] = {}
     duplicate_count = 0
