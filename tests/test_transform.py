@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import logging
 from decimal import Decimal
 
 import polars as pl
@@ -271,3 +272,49 @@ def test_transform_empty_dataframe_returns_empty_list() -> None:
         event_names_filter=["af_purchase"],
     )
     assert rows == []
+
+
+def test_transform_collapses_exact_duplicate_rows(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """AppsFlyer returning the identical row twice within one report response
+    (not issue #7's cross-report case) is collapsed to one row, with a WARNING
+    for visibility — same principle as issue #10's wipe-visibility logging.
+    """
+    df = _df([_raw_row(), _raw_row()])
+    with caplog.at_level(logging.WARNING, logger="appsflyer_pipeline.transform"):
+        rows = transform_events(
+            df,
+            attribution_type="non_organic",
+            app_id="id1458505230",
+            media_source_filter="Facebook Ads",
+            event_names_filter=["af_purchase", "af_purchase_YC"],
+        )
+    assert len(rows) == 1
+    assert any(
+        "collapsed 1 exact-duplicate" in r.message and "id1458505230" in r.message
+        for r in caplog.records
+    )
+
+
+def test_transform_raises_on_conflicting_duplicate_rows() -> None:
+    """Same key (event_time, event_name, appsflyer_id) but different
+    event_revenue is not a safe-to-collapse duplicate — the dedup key's
+    uniqueness assumption doesn't hold for this data, so it must fail loudly
+    rather than silently pick one value (Mark's key explicitly excludes
+    event_revenue, BAF-2 comment 62585).
+    """
+    df = _df(
+        [
+            _raw_row(**{"Event Revenue": "9.99"}),
+            _raw_row(**{"Event Revenue": "19.99"}),
+        ]
+    )
+    with pytest.raises(TransformError, match="Conflicting duplicate"):
+        transform_events(
+            df,
+            attribution_type="non_organic",
+            app_id="id1458505230",
+            media_source_filter="Facebook Ads",
+            event_names_filter=["af_purchase", "af_purchase_YC"],
+        )

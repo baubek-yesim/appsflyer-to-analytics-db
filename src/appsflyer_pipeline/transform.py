@@ -8,12 +8,15 @@ per docs/design-spec.md's risk mitigation for that scenario.
 from __future__ import annotations
 
 import datetime
+import logging
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import polars as pl
 
 from appsflyer_pipeline.appsflyer_client import AttributionType
+
+logger = logging.getLogger(__name__)
 
 _TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -68,6 +71,42 @@ def _parse_revenue(value: str | None) -> Decimal | None:
         return Decimal(value)
     except InvalidOperation as exc:
         raise TransformError(f"Unexpected event_revenue value: {value!r}") from exc
+
+
+def _dedupe_rows(
+    rows: list[dict[str, Any]], *, attribution_type: AttributionType, app_id: str
+) -> list[dict[str, Any]]:
+    """Collapse exact duplicate rows sharing (event_time, event_name, appsflyer_id).
+
+    `attribution_type`/`app_id` are constant across one transform_events call, so
+    this 3-column key is covariant with Mark's full 4-column dedup key (BAF-2
+    comment 62585) — neither column can differ within a single call. Rows
+    sharing the key but disagreeing on any other field raise: that means the
+    key's uniqueness assumption doesn't hold for this data and needs a human,
+    not a silent pick.
+    """
+    seen: dict[tuple[Any, Any, Any], dict[str, Any]] = {}
+    duplicate_count = 0
+    for row in rows:
+        key = (row["event_time"], row["event_name"], row["appsflyer_id"])
+        existing = seen.get(key)
+        if existing is None:
+            seen[key] = row
+        elif existing == row:
+            duplicate_count += 1
+        else:
+            raise TransformError(
+                f"Conflicting duplicate rows for key {key!r} "
+                f"(attribution_type={attribution_type}, app_id={app_id}): {existing} vs {row}"
+            )
+    if duplicate_count:
+        logger.warning(
+            "collapsed %d exact-duplicate row(s): attribution_type=%s app_id=%s",
+            duplicate_count,
+            attribution_type,
+            app_id,
+        )
+    return list(seen.values())
 
 
 def transform_events(
@@ -136,4 +175,4 @@ def transform_events(
 
         rows.append(row)
 
-    return rows
+    return _dedupe_rows(rows, attribution_type=attribution_type, app_id=app_id)
