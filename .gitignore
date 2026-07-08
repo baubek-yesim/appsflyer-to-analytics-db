@@ -34,3 +34,6 @@ htmlcov/
 
 # Local git worktrees used for isolated feature-branch work.
 /.worktrees/
+
+# subagent-driven-development scratch progress ledger (per-worktree, not shared history)
+/.superpowers/
