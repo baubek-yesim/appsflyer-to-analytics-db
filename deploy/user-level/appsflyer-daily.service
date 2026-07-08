@@ -4,6 +4,7 @@ Documentation=https://yesimapp.atlassian.net/browse/BAF-2
 # No Wants=/After=network-online.target here (unlike the root-based unit): that target does
 # not exist in a systemd --user manager. The 05:00 OnCalendar fire time plus the timer's
 # RandomizedDelaySec is the real guarantee the network is up by the time this runs.
+OnFailure=appsflyer-alert@%n.service
 
 [Service]
 Type=oneshot

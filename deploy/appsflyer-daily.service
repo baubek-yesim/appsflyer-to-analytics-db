@@ -3,6 +3,7 @@ Description=AppsFlyer -> analytics DB daily incremental load (BAF-2)
 Documentation=https://yesimapp.atlassian.net/browse/BAF-2
 Wants=network-online.target
 After=network-online.target
+OnFailure=appsflyer-alert@%n.service
 
 [Service]
 Type=oneshot

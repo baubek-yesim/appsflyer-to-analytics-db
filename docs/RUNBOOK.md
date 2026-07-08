@@ -146,9 +146,11 @@ production table. `create-table`/`sql/create_table.sql` include both in any futu
 sudo install -m 644 \
   /opt/appsflyer/appsflyer-to-analytics-db/deploy/appsflyer-daily.service \
   /opt/appsflyer/appsflyer-to-analytics-db/deploy/appsflyer-daily.timer \
+  /opt/appsflyer/appsflyer-to-analytics-db/deploy/appsflyer-alert@.service \
   /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now appsflyer-daily.timer   # enable the TIMER only, never the .service directly
+# appsflyer-alert@.service needs no `enable` -- OnFailure= starts it on demand (see §10).
 ```
 
 Why the venv console script and not `uv run appsflyer-pipeline daily` as `ExecStart`: `uv run`
@@ -254,6 +256,31 @@ loads are idempotent and independent). Clear the cosmetic failed flag with:
 sudo systemctl reset-failed appsflyer-daily.service
 ```
 
+**Alerting on failure (issue #16):** both `appsflyer-daily.service` variants declare
+`OnFailure=appsflyer-alert@%n.service`, so a non-zero exit triggers
+`appsflyer-alert@appsflyer-daily.service` — a stub unit that logs a loud, `crit`-priority,
+greppable journal entry. It does **not** page anyone yet; there is no webhook/mail backend
+configured. Wire one in by editing only the alert unit's `ExecStart` (root:
+`deploy/appsflyer-alert@.service`; user-level: `deploy/user-level/appsflyer-alert@.service`) —
+`appsflyer-daily.service` itself never needs to change again.
+
+Test the wiring without breaking the real job:
+```bash
+# user-level (what's actually live):
+systemctl --user start appsflyer-alert@appsflyer-daily.service
+journalctl --user -u appsflyer-alert@appsflyer-daily.service --no-pager
+
+# root-based (once live):
+sudo systemctl start appsflyer-alert@appsflyer-daily.service
+sudo journalctl -u appsflyer-alert@appsflyer-daily.service --no-pager
+```
+
+**Structural limit:** `OnFailure=` only fires when the service *exits non-zero* — it cannot detect
+the timer silently failing to fire at all (a broken timer, a machine that never boots back up).
+If that failure mode matters, add a dead-man's switch instead/in addition: ping a
+healthchecks.io-style URL as the last step of a successful `daily` run, and let the external
+monitor alert on missed pings.
+
 ## 11. Troubleshooting
 
 | Symptom | Likely cause | Fix |
@@ -329,7 +356,8 @@ mkdir -p ~/appsflyer-secrets && chmod 700 ~/appsflyer-secrets
 chmod 600 ~/appsflyer-secrets/appsflyer.env
 
 mkdir -p ~/.config/systemd/user
-# deploy/user-level/appsflyer-daily.{service,timer} copied to ~/.config/systemd/user/
+# deploy/user-level/appsflyer-daily.{service,timer} and appsflyer-alert@.service copied to
+# ~/.config/systemd/user/
 systemctl --user daemon-reload
 
 loginctl enable-linger "$(whoami)"   # exit 0, no root needed -- self-linger is polkit-allowed here

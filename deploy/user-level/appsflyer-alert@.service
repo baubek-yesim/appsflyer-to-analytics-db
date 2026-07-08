@@ -1,0 +1,12 @@
+[Unit]
+Description=Alert stub for a failed AppsFlyer unit: %i (BAF-2) [user-level stopgap]
+Documentation=https://yesimapp.atlassian.net/browse/BAF-2
+
+[Service]
+Type=oneshot
+# STUB (issue #16): no real notification backend exists yet (no Slack/Telegram webhook, no
+# healthchecks.io account). This only guarantees a failure is loud and greppable in journald --
+# it does not page anyone. Replace ExecStart with a real `curl` to a webhook, a `mail` command,
+# or similar once a backend is available; nothing else about this unit or appsflyer-daily.service
+# needs to change when that happens. See docs/RUNBOOK.md's "Alerting on failure" section.
+ExecStart=/usr/bin/systemd-cat -t appsflyer-alert -p crit /bin/echo "ALERT: %i failed -- run: journalctl --user -u %i --since today"
