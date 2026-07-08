@@ -73,7 +73,7 @@ sudo git clone https://github.com/baubek-yesim/appsflyer-to-analytics-db.git \
 sudo chown -R appsflyer:appsflyer /opt/appsflyer
 
 # Build as the service user so ownership/permissions are correct throughout:
-sudo -u appsflyer --login bash -c '
+sudo -u appsflyer env HOME=/opt/appsflyer bash -c '
   cd /opt/appsflyer/appsflyer-to-analytics-db &&
   uv sync --frozen --no-dev'
 
@@ -284,7 +284,7 @@ section).
 ## 13. Redeploy / upgrade
 
 ```bash
-sudo -u appsflyer --login bash -c '
+sudo -u appsflyer env HOME=/opt/appsflyer bash -c '
   cd /opt/appsflyer/appsflyer-to-analytics-db && git pull && uv sync --frozen --no-dev'
 ```
 If the unit files themselves changed, re-run §7's `install` + `daemon-reload`. No explicit "restart"
