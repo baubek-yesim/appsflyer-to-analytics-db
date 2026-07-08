@@ -32,6 +32,11 @@ htmlcov/
 # kept for review/reference, never committed (this repo is public).
 /reference/
 
+# One-off read-only production audit/probe scripts (e.g. issue #7's/#23's
+# duplicate-row investigations) — local-only, never committed (this repo is
+# public and these connect to production credentials via .env).
+/scratch/
+
 # Local git worktrees used for isolated feature-branch work.
 /.worktrees/
 
