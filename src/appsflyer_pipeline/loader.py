@@ -82,7 +82,7 @@ def check_connection(engine: Engine, table_name: str) -> ConnectionStatus:
             )
             row_count = None
             if table_exists:
-                count_query = text(f"SELECT COUNT(*) FROM `{table_name}`")  # noqa: S608
+                count_query = text(f"SELECT COUNT(*) FROM `{table_name}`")
                 row_count = conn.execute(count_query).scalar_one()
             return ConnectionStatus(
                 server_version=version, table_exists=table_exists, row_count=row_count
@@ -170,15 +170,13 @@ def load_events(
     window_end = datetime.datetime.combine(end_date + datetime.timedelta(days=1), datetime.time.min)
 
     delete_stmt = text(
-        f"DELETE FROM `{table_name}` "  # noqa: S608 - table_name is validated above
+        f"DELETE FROM `{table_name}` "
         "WHERE app_id = :app_id AND attribution_type = :attribution_type "
         "AND event_time >= :window_start AND event_time < :window_end"
     )
     columns_sql = ", ".join(f"`{c}`" for c in _INSERT_COLUMNS)
     placeholders_sql = ", ".join(f":{c}" for c in _INSERT_COLUMNS)
-    insert_stmt = text(
-        f"INSERT INTO `{table_name}` ({columns_sql}) VALUES ({placeholders_sql})"  # noqa: S608
-    )
+    insert_stmt = text(f"INSERT INTO `{table_name}` ({columns_sql}) VALUES ({placeholders_sql})")
 
     try:
         with engine.begin() as conn:

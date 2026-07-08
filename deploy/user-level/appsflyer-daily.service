@@ -1,8 +1,9 @@
 [Unit]
 Description=AppsFlyer -> analytics DB daily incremental load (BAF-2) [user-level stopgap, no root]
 Documentation=https://yesimapp.atlassian.net/browse/BAF-2
-Wants=network-online.target
-After=network-online.target
+# No Wants=/After=network-online.target here (unlike the root-based unit): that target does
+# not exist in a systemd --user manager. The 05:00 OnCalendar fire time plus the timer's
+# RandomizedDelaySec is the real guarantee the network is up by the time this runs.
 
 [Service]
 Type=oneshot

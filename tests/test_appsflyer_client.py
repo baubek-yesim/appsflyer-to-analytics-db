@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 
 import httpx
+import polars as pl
 import pytest
 import respx
 from tenacity import wait_none
@@ -301,7 +302,7 @@ def test_fetch_events_raises_on_1m_row_cap(monkeypatch: pytest.MonkeyPatch) -> N
     1,000,000 rows with no error. fetch_events must fail loudly instead of
     returning truncated data as if it were a complete, successful fetch.
     """
-    monkeypatch.setattr(appsflyer_client.pl, "read_csv", lambda *args, **kwargs: _StubDataFrame())
+    monkeypatch.setattr(pl, "read_csv", lambda *args, **kwargs: _StubDataFrame())
     respx.get(_url("id123", "non_organic")).mock(return_value=httpx.Response(200, text=SAMPLE_CSV))
     with httpx.Client() as client, pytest.raises(AppsFlyerAPIError, match="1M-row cap"):
         fetch_events(

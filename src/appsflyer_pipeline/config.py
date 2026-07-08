@@ -44,7 +44,7 @@ class Settings(BaseSettings):
 
     # Run parameters — defaulted to the BAF-2 acceptance criteria, overridable via env.
     appsflyer_media_source: str = "Facebook Ads"
-    appsflyer_event_names: Annotated[CsvList, Field(min_length=1)] = [  # noqa: RUF012
+    appsflyer_event_names: Annotated[CsvList, Field(min_length=1)] = [
         "af_purchase",
         "af_purchase_YC",
     ]

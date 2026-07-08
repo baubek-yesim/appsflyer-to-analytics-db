@@ -41,6 +41,7 @@ uv run ruff check .          # lint
 uv run ruff format .         # format
 uv run mypy                  # type check
 uv run pytest                # tests (unit + respx-mocked HTTP; mysql:8 service in CI)
+uv run pre-commit run --all-files   # same checks CI gates on — run before pushing
 ```
 
 ## Deployment

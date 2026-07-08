@@ -95,7 +95,7 @@
   `backfill` also accepts `--start-date`/`--end-date` and `daily` accepts `--date` (ISO `YYYY-MM-DD`)
   to override the default window — a deliberate extension beyond the original spec, useful for
   gap-filling a missed day and for probing what AppsFlyer actually returns before its 90-day
-  retention floor (see the backfill-window risk above). An explicit `--start-date` earlier than the
+  retention floor (see the backfill-window risk below). An explicit `--start-date` earlier than the
   floor is *not* silently clamped — the request proceeds and a warning is logged, since the resulting
   behavior is itself evidence toward resolving that open question.
 - **Config (env / `.env`):** see `.env.example` — `DB_HOST/PORT/USER/PASSWORD/NAME/TABLE`,

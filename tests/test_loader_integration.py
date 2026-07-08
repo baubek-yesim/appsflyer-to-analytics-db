@@ -28,7 +28,7 @@ def test_check_connection_reports_server_version_and_table_status() -> None:
         settings = get_settings()
         engine = create_engine(settings)
         status = check_connection(engine, settings.db_table)
-    except Exception as exc:  # noqa: BLE001 - environment without a reachable/configured DB
+    except Exception as exc:
         pytest.skip(f"no usable database in this environment: {exc}")
 
     assert status.server_version
@@ -46,7 +46,7 @@ def test_check_connection_reports_missing_table() -> None:
         settings = get_settings()
         engine = create_engine(settings)
         status = check_connection(engine, "__pytest_definitely_missing_table__")
-    except Exception as exc:  # noqa: BLE001 - environment without a reachable/configured DB
+    except Exception as exc:
         pytest.skip(f"no usable database in this environment: {exc}")
 
     assert status.table_exists is False
@@ -60,7 +60,7 @@ def test_create_table_is_idempotent() -> None:
         create_table(engine, settings.db_table)
         create_table(engine, settings.db_table)  # second call must not raise
         status = check_connection(engine, settings.db_table)
-    except Exception as exc:  # noqa: BLE001 - environment without a reachable/configured DB
+    except Exception as exc:
         pytest.skip(f"no usable database in this environment: {exc}")
 
     assert status.table_exists is True
@@ -71,7 +71,7 @@ def test_load_events_is_idempotent_and_isolated() -> None:
         settings = get_settings()
         engine = create_engine(settings)
         create_table(engine, settings.db_table)
-    except Exception as exc:  # noqa: BLE001 - environment without a reachable/configured DB
+    except Exception as exc:
         pytest.skip(f"no usable database in this environment: {exc}")
 
     # A sentinel app_id that can never collide with a real AppsFlyer app id,
@@ -122,7 +122,7 @@ def test_load_events_is_idempotent_and_isolated() -> None:
         with engine.connect() as conn:
             actual_count = conn.execute(
                 text(
-                    f"SELECT COUNT(*) FROM `{settings.db_table}` "  # noqa: S608
+                    f"SELECT COUNT(*) FROM `{settings.db_table}` "
                     "WHERE app_id = :app_id AND attribution_type = :attribution_type"
                 ),
                 {"app_id": test_app_id, "attribution_type": test_attribution},
@@ -156,7 +156,7 @@ def test_load_events_logs_rowcounts_and_warns_on_wipe(
         settings = get_settings()
         engine = create_engine(settings)
         create_table(engine, settings.db_table)
-    except Exception as exc:  # noqa: BLE001 - environment without a reachable/configured DB
+    except Exception as exc:
         pytest.skip(f"no usable database in this environment: {exc}")
 
     test_app_id = "__pytest_wipe_test_app__"
