@@ -36,11 +36,18 @@ class Settings(BaseSettings):
 
     # AppsFlyer Pull API
     appsflyer_api_token: str
-    appsflyer_app_ids: CsvList
+    # min_length=1 (issue #9): an empty value (e.g. a truncated line in the server's
+    # hand-edited EnvironmentFile) must fail startup loudly — an empty app list is a
+    # silent no-op run that exits 0, and an empty event list actively wipes windows
+    # (transform re-filters with is_in([]) and the loader then delete-then-inserts nothing).
+    appsflyer_app_ids: Annotated[CsvList, Field(min_length=1)]
 
     # Run parameters — defaulted to the BAF-2 acceptance criteria, overridable via env.
     appsflyer_media_source: str = "Facebook Ads"
-    appsflyer_event_names: CsvList = ["af_purchase", "af_purchase_YC"]  # noqa: RUF012
+    appsflyer_event_names: Annotated[CsvList, Field(min_length=1)] = [  # noqa: RUF012
+        "af_purchase",
+        "af_purchase_YC",
+    ]
 
     # Daily trailing-window depth (issue #8): the scheduled `daily` run pulls
     # [yesterday - (N-1), yesterday]. Default 1 preserves the original single-day

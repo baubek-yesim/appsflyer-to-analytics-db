@@ -26,12 +26,17 @@ SyslogIdentifier=appsflyer-daily
 # ProtectHome/ProtectSystem=strict are intentionally omitted here: they would
 # hide /home entirely, which is where the repo, venv, and secrets file live
 # for a per-user deployment.
+# ProtectClock/ProtectKernelModules/ProtectKernelLogs are deliberately ABSENT
+# here (the root-based unit keeps them): each implies dropping capabilities
+# from the bounding set, which an unprivileged user manager can only do inside
+# a user namespace — and Ubuntu 24.04's default
+# kernel.apparmor_restrict_unprivileged_userns=1 forbids that, failing the
+# unit with 218/CAPABILITIES before the pipeline even starts (issue #19,
+# observed on the first scheduled fire). They'd be security no-ops here
+# anyway: an unprivileged process never holds CAP_SYS_TIME/SYS_MODULE/SYSLOG.
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectClock=true
 ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectKernelLogs=true
 ProtectControlGroups=true
 ProtectHostname=true
 RestrictNamespaces=true
