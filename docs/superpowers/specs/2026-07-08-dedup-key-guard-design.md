@@ -1,10 +1,10 @@
 # Design: duplicate-row guard on (event_time, event_name, appsflyer_id, attribution_type)
 
 **Date:** 2026-07-08
-**Issue:** to be filed (see "GitHub issue text" below) — stems from Mark Malovichko's dedup-key
-comment on BAF-2 (comment 62585), surfaced while reviewing his original reference scripts
-(`reference/mark-scripts/`, gitignored, local-only).
-**Status:** approved in brainstorming, ready for implementation planning
+**Issue:** [#23](https://github.com/baubek-yesim/appsflyer-to-analytics-db/issues/23) — stems from
+Mark Malovichko's dedup-key comment on BAF-2 (comment 62585), surfaced while reviewing his
+original reference scripts (`reference/mark-scripts/`, gitignored, local-only).
+**Status:** approved in brainstorming, issue filed, ready for implementation planning
 
 ## Goals
 
@@ -118,7 +118,7 @@ Sequencing (mirrors #7's fix → deploy → purge → reconfirm):
   conflict) are fully covered by these two new tests plus the many existing single-row tests that
   already exercise "no duplicate encountered."
 
-## GitHub issue text (to be filed)
+## GitHub issue text (filed as #23)
 
 **Title:** No dedup guard on `(event_time, event_name, appsflyer_id, attribution_type)` — a
 same-report duplicate row would load twice, uncaught
@@ -176,7 +176,7 @@ same-report duplicate row would load twice, uncaught
 
 ## Delivery
 
-- One branch/PR (per explicit choice: fix + audit together, matching #7's scope), e.g.
-  `issue-NN-dedup-key-guard` once the issue number is known.
+- One branch/PR (per explicit choice: fix + audit together, matching #7's scope):
+  `issue-23-dedup-key-guard`.
 - This spec rides with that branch.
 - Merge only on the user's explicit authorization, per established workflow.
