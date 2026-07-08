@@ -84,7 +84,10 @@
 - **Backfill:** window = [today − 90d, yesterday] (subject to the conflict below), split into ≤31-day
   chunks; each chunk pulled from both sources, transformed, and loaded independently — a chunk failure
   doesn't roll back earlier chunks (idempotent replay is cheap and safe).
-- **Daily:** window = [yesterday, yesterday]; same client/transform/load path as one backfill chunk.
+- **Daily:** window = [yesterday − (N−1), yesterday], N = `APPSFLYER_DAILY_LOOKBACK_DAYS`
+  (default 1, i.e. the original [yesterday, yesterday] — issue #8); same client/transform/load
+  path as one backfill chunk. An explicit `--date` pulls exactly that one day (targeted repair),
+  ignoring the lookback.
 
 ## Interfaces
 
@@ -96,7 +99,10 @@
   floor is *not* silently clamped — the request proceeds and a warning is logged, since the resulting
   behavior is itself evidence toward resolving that open question.
 - **Config (env / `.env`):** see `.env.example` — `DB_HOST/PORT/USER/PASSWORD/NAME/TABLE`,
-  `APPSFLYER_API_TOKEN`, `APPSFLYER_APP_IDS`, `APPSFLYER_MEDIA_SOURCE`, `APPSFLYER_EVENT_NAMES`.
+  `APPSFLYER_API_TOKEN`, `APPSFLYER_APP_IDS`, `APPSFLYER_MEDIA_SOURCE`, `APPSFLYER_EVENT_NAMES`,
+  `APPSFLYER_DAILY_LOOKBACK_DAYS` (default 1). The two CSV list fields reject empty values at
+  startup (issue #9) — a truncated EnvironmentFile line fails loudly instead of producing a
+  silent no-op run (empty app list) or an active window wipe (empty event list).
 - **Table schema:** `sql/create_table.sql` (Stage 2), per Mark's DDL in BAF-2 comment 62293.
 
 ## Alternatives Considered
@@ -120,6 +126,7 @@
 | **Ticket asks for backfill from 2025-01-01, but the Pull API retains only 90 days** (Mark's comment) | AC as written is unsatisfiable via this API | **Blocking — needs stakeholder decision** (accept rolling ~90-day backfill, or source pre-90-day history from AppsFlyer Data Locker/raw export/legacy table). Pipeline built to backfill the full available window; gap is flagged, not silently dropped. |
 | AppsFlyer API rate limits / transient 5xx | Chunk pull fails mid-backfill | `tenacity` retry with exponential backoff + jitter; chunk-level isolation means a retry doesn't redo the whole backfill. |
 | **AppsFlyer's daily report-download quota** (confirmed live, Stage 7: `HTTP 400 "You've reached your maximum number of in-app event reports that can be downloaded today for this app"`) | One (app_id, attribution_type) combo fails for the rest of that calendar day | This is a plain 4xx, not 429/5xx, so it correctly fails fast rather than retrying (retrying would just fail again immediately). Chunk-level isolation means only the affected combo is skipped — confirmed live twice (Stage 7): 11/12 backfill windows still loaded, and separately 2/4 `daily` windows. The quota appears to trip per (app_id, attribution_type) after roughly 6-7 report downloads in a single day — heavy same-day testing (dry-run previews *and* real runs *and* manual preflight checks, all against the same app/attribution pairs) exhausts it fast. Fix is time, not retries: re-run just the affected window(s) (`backfill --start-date/--end-date`) once the quota resets the next day. Operational takeaway: during any first-time or heavy manual testing, prefer going straight to a real (non-dry-run) call over a dry-run-then-real pair, and avoid re-running the same window/app repeatedly within one day. |
+| **Late/offline-cached events arrive after the daily pull** (the 05:00 +03 timer = exactly AppsFlyer's documented 02:00 UTC late-event boundary; SDK-cached events from offline devices can arrive days late — issue #8) | Slow, silent under-count of purchases/revenue: a single-day window never revisits past days, and every run still reports success | `APPSFLYER_DAILY_LOOKBACK_DAYS` re-pulls a trailing window daily — zero extra quota at depths ≤31 (still one report download per combo per run) and idempotent by construction. **Default is 1 (original behavior); production enablement (recommended: 3) is an explicit operator decision, flagged here rather than silently changed.** #10's wipe-visibility logging covers the widened delete window. |
 | Partial load (process killed mid-run) | Inconsistent window state | Delete+insert wrapped in a single DB transaction per window/source — either fully applied or fully rolled back. |
 | Duplicate or re-attributed events on re-pull | Overcounted revenue | Delete-by-window-then-insert makes re-runs idempotent by construction. |
 | **Dual attribution: a retargeting-attributed event also appears in the UA report as a secondary copy** (confirmed in production: 14 duplicated purchases, ~1.7% of revenue in the measured window — issue #7) | Revenue double-counted when summing across `attribution_type` | The `non_organic` pull drops rows with `Is Primary Attribution = false` (a **standard** v5 export column — requesting it via `additional_fields` gets HTTP 400, verified live); the retargeting report delivers those events as primary. Windows loaded before this fix need one idempotent re-run to purge existing duplicates. |
