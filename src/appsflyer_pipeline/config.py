@@ -49,6 +49,16 @@ class Settings(BaseSettings):
         "af_purchase_YC",
     ]
 
+    # Daily trailing-window depth (issue #8): the scheduled `daily` run pulls
+    # [yesterday - (N-1), yesterday]. Default 1 preserves the original single-day
+    # pull; deeper windows re-capture AppsFlyer late/offline-cached events (the
+    # 05:00 +03 timer fires exactly at AppsFlyer's 02:00 UTC late-event boundary)
+    # and cost no extra API quota at N <= 31 (one report download per
+    # app/attribution regardless of range length). Upper bound = the Pull API's
+    # ~90-day retention (appsflyer_client.MAX_RETENTION_DAYS; literal here to
+    # keep config free of package imports).
+    appsflyer_daily_lookback_days: Annotated[int, Field(ge=1, le=90)] = 1
+
     @field_validator("appsflyer_app_ids", "appsflyer_event_names", mode="before")
     @classmethod
     def _parse_csv_fields(cls, value: object) -> object:

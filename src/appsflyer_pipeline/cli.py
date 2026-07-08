@@ -140,13 +140,20 @@ def backfill(
 @app.command()
 def daily(
     date: str | None = typer.Option(
-        None, "--date", help="ISO date (YYYY-MM-DD); defaults to yesterday."
+        None,
+        "--date",
+        help=(
+            "ISO date (YYYY-MM-DD): pull exactly this one day (targeted repair), "
+            "ignoring APPSFLYER_DAILY_LOOKBACK_DAYS. Default: the trailing "
+            "lookback window ending yesterday."
+        ),
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Fetch and transform but don't write to the database."
     ),
 ) -> None:
-    """Daily incremental load: pulls one day (defaults to yesterday) from both sources."""
+    """Daily incremental load: pulls the trailing lookback window (default: yesterday
+    only) from both sources."""
     target_date = _parse_optional_date(date, "--date")
 
     try:

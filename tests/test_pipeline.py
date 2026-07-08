@@ -290,3 +290,37 @@ def test_today_returns_a_real_date() -> None:
     # Every other test monkeypatches _today(); this exercises its actual body once.
     # Avoid asserting == datetime.date.today() to sidestep midnight-rollover flakiness.
     assert isinstance(pipeline._today(), datetime.date)
+
+
+def test_run_daily_lookback_widens_default_window(
+    monkeypatch: pytest.MonkeyPatch, load_spy: list[dict[str, Any]]
+) -> None:
+    _set_env(monkeypatch, APPSFLYER_DAILY_LOOKBACK_DAYS="3")
+    fixed_today = datetime.date(2026, 7, 7)
+    monkeypatch.setattr(pipeline, "_today", lambda: fixed_today)
+    expected_end = fixed_today - datetime.timedelta(days=1)
+    expected_start = expected_end - datetime.timedelta(days=2)
+
+    with respx.mock:
+        _mock_all_ok()
+        summary = run_daily(dry_run=True)
+
+    assert all(
+        r.start_date == expected_start and r.end_date == expected_end for r in summary.results
+    )
+    # 3 days <= 31 -> still exactly one chunk (one report download) per combo: no extra quota.
+    assert len(summary.results) == len(APP_IDS) * len(ATTRIBUTION_TYPES)
+
+
+def test_run_daily_explicit_date_ignores_lookback(
+    monkeypatch: pytest.MonkeyPatch, load_spy: list[dict[str, Any]]
+) -> None:
+    """--date is a targeted repair tool: exactly [date, date], lookback or not."""
+    _set_env(monkeypatch, APPSFLYER_DAILY_LOOKBACK_DAYS="3")
+    target = datetime.date(2026, 5, 20)
+
+    with respx.mock:
+        _mock_all_ok()
+        summary = run_daily(date=target, dry_run=True)
+
+    assert all(r.start_date == target and r.end_date == target for r in summary.results)

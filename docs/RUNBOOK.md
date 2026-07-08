@@ -105,6 +105,11 @@ is written with the space literal and unquoted. `APPSFLYER_APP_IDS`/`APPSFLYER_E
 comma-separated values, **not** JSON arrays (the app's `CsvList` type disables JSON decoding, so a
 `[...]` literal would be mis-split on commas).
 
+Optional: `APPSFLYER_DAILY_LOOKBACK_DAYS=3` widens the daily run to a trailing 3-day
+window ending yesterday, re-capturing AppsFlyer late/offline-cached events at no extra
+report-download quota (default when unset: 1 = yesterday only; see
+`deploy/appsflyer.env.example` for the full rationale).
+
 ## 6. Preflight — through systemd, not a shell `source`
 
 Sourcing the env file in bash would choke on the unquoted space in `Facebook Ads` (bash would try to

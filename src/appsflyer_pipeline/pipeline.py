@@ -269,8 +269,20 @@ def run_backfill(
 
 
 def run_daily(*, date: datetime.date | None = None, dry_run: bool = False) -> RunSummary:
-    """Daily incremental load. Defaults to yesterday — a one-day special case
-    of run_backfill's window, sharing all of the same fetch/transform/load logic.
+    """Daily incremental load, sharing run_backfill's fetch/transform/load path.
+
+    The default window is [yesterday - (N-1), yesterday] where N is
+    settings.appsflyer_daily_lookback_days — the same days_back shape as the
+    backfill, re-pulling recent days on every run so late/offline-cached
+    AppsFlyer events get captured (issue #8). N=1 (the default) is the
+    original single-day pull. Idempotent delete-then-insert makes the daily
+    rewrite of recent days safe by construction.
+
+    An explicit `date` is a targeted repair tool and always pulls exactly
+    [date, date], regardless of the lookback setting.
     """
-    target_date = date or (_today() - datetime.timedelta(days=1))
-    return _run_window(target_date, target_date, dry_run=dry_run)
+    if date is not None:
+        return _run_window(date, date, dry_run=dry_run)
+    end = _today() - datetime.timedelta(days=1)
+    start = end - datetime.timedelta(days=get_settings().appsflyer_daily_lookback_days - 1)
+    return _run_window(start, end, dry_run=dry_run)

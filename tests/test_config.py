@@ -60,3 +60,18 @@ def test_empty_csv_list_rejected(monkeypatch: pytest.MonkeyPatch, field: str, ra
     """
     with pytest.raises(ValidationError):
         _settings(monkeypatch, **{field: raw})
+
+
+def test_daily_lookback_defaults_to_single_day(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _settings(monkeypatch).appsflyer_daily_lookback_days == 1
+
+
+def test_daily_lookback_accepts_valid_depth(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _settings(monkeypatch, APPSFLYER_DAILY_LOOKBACK_DAYS="3")
+    assert settings.appsflyer_daily_lookback_days == 3
+
+
+@pytest.mark.parametrize("raw", ["0", "-3", "91", "not-a-number"])
+def test_daily_lookback_out_of_bounds_rejected(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+    with pytest.raises(ValidationError):
+        _settings(monkeypatch, APPSFLYER_DAILY_LOOKBACK_DAYS=raw)
