@@ -5,6 +5,7 @@ for the analytics MariaDB.
 from __future__ import annotations
 
 import datetime
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -16,6 +17,8 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from appsflyer_pipeline.config import Settings
+
+logger = logging.getLogger(__name__)
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
@@ -179,7 +182,7 @@ def load_events(
 
     try:
         with engine.begin() as conn:
-            conn.execute(
+            deleted = conn.execute(
                 delete_stmt,
                 {
                     "app_id": app_id,
@@ -187,7 +190,7 @@ def load_events(
                     "window_start": window_start,
                     "window_end": window_end,
                 },
-            )
+            ).rowcount
             if rows:
                 conn.execute(insert_stmt, rows)
     except SQLAlchemyError as exc:
@@ -196,4 +199,26 @@ def load_events(
             f"attribution_type={attribution_type!r} window=[{start_date}, {end_date}]: {exc}"
         ) from exc
 
+    logger.info(
+        "loaded app_id=%s attribution_type=%s window=[%s, %s]: deleted=%d inserted=%d",
+        app_id,
+        attribution_type,
+        start_date,
+        end_date,
+        deleted,
+        len(rows),
+    )
+    if deleted > 0 and not rows:
+        # Issue #10: delete-then-insert makes a successful-but-empty fetch erase an
+        # already-loaded window with zero trace. Legitimate only if AppsFlyer really
+        # revised the window to zero events — so it must be loud in journalctl.
+        logger.warning(
+            "wiped previously loaded window: app_id=%s attribution_type=%s "
+            "window=[%s, %s] deleted=%d inserted=0",
+            app_id,
+            attribution_type,
+            start_date,
+            end_date,
+            deleted,
+        )
     return len(rows)

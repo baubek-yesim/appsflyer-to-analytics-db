@@ -13,6 +13,7 @@ against production too.
 from __future__ import annotations
 
 import datetime
+import logging
 from decimal import Decimal
 
 import pytest
@@ -140,4 +141,91 @@ def test_load_events_is_idempotent_and_isolated() -> None:
             attribution_type=test_attribution,
             start_date=window_start,
             end_date=window_end,
+        )
+
+
+def test_load_events_logs_rowcounts_and_warns_on_wipe(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Issue #10: a successful-but-empty fetch silently erased a loaded window.
+    Every load must log deleted/inserted counts; a non-empty->empty transition
+    must WARN so it is loud in journalctl. Sentinel app_id + delete-only cleanup
+    keep this safe against the production DB (same pattern as the test above).
+    """
+    try:
+        settings = get_settings()
+        engine = create_engine(settings)
+        create_table(engine, settings.db_table)
+    except Exception as exc:  # noqa: BLE001 - environment without a reachable/configured DB
+        pytest.skip(f"no usable database in this environment: {exc}")
+
+    test_app_id = "__pytest_wipe_test_app__"
+    test_attribution = "non_organic"
+    window = datetime.date(2020, 1, 2)
+    row = {
+        "event_time": datetime.datetime(2020, 1, 2, 12, 0, 0),
+        "install_time": None,
+        "attributed_touch_time": None,
+        "event_name": "af_purchase",
+        "event_revenue": Decimal("1.23"),
+        "media_source": "Facebook Ads",
+        "channel": None,
+        "campaign": None,
+        "campaign_id": None,
+        "adset": None,
+        "adset_id": None,
+        "ad": None,
+        "ad_id": None,
+        "appsflyer_id": "test-af-id",
+        "customer_user_id": None,
+        "attribution_type": test_attribution,
+        "app_id": test_app_id,
+    }
+
+    try:
+        with caplog.at_level(logging.INFO, logger="appsflyer_pipeline.loader"):
+            load_events(
+                engine,
+                settings.db_table,
+                [row],
+                app_id=test_app_id,
+                attribution_type=test_attribution,
+                start_date=window,
+                end_date=window,
+            )
+        # First load into an empty window: counts logged, nothing to warn about.
+        assert any("deleted=0" in r.message and "inserted=1" in r.message for r in caplog.records)
+        assert not any(r.levelno == logging.WARNING for r in caplog.records)
+
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="appsflyer_pipeline.loader"):
+            load_events(
+                engine,
+                settings.db_table,
+                [],
+                app_id=test_app_id,
+                attribution_type=test_attribution,
+                start_date=window,
+                end_date=window,
+            )
+        # Re-loading the now-populated window with zero rows is a wipe: WARN.
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "wiped" in warnings[0].message
+        assert "deleted=1" in warnings[0].message
+        assert any(
+            "deleted=1" in r.message and "inserted=0" in r.message
+            for r in caplog.records
+            if r.levelno == logging.INFO
+        )
+    finally:
+        # Delete-only call for the same window cleans up regardless of outcome.
+        load_events(
+            engine,
+            settings.db_table,
+            [],
+            app_id=test_app_id,
+            attribution_type=test_attribution,
+            start_date=window,
+            end_date=window,
         )
