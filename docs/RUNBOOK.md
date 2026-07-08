@@ -255,6 +255,7 @@ sudo systemctl reset-failed appsflyer-daily.service
 | `AppsFlyerAPIError: HTTP 400 "...maximum number of in-app event reports that can be downloaded today..."` | AppsFlyer's per-app daily report-download quota exhausted (confirmed live — see the note in §9) | Don't retry today — it will fail again. Wait for the quota to reset (next day), then re-run just the failed window(s) with `backfill --start-date/--end-date`. |
 | Job killed / times out | `TimeoutStartSec` too low for a large window | Already 1800s for daily / 7200s for backfill in the examples above; raise further if needed. |
 | `SIGSYS` or crash right at startup | A hardening directive is too tight | Comment out `MemoryDenyWriteExecute` if enabled, then loosen `SystemCallFilter`; `daemon-reload` and retry. |
+| `status=218/CAPABILITIES`, "Failed to drop capabilities" (user-level unit, §14) | `ProtectClock`/`ProtectKernelModules`/`ProtectKernelLogs` in a `systemd --user` unit on a host that forbids unprivileged user namespaces (Ubuntu 24.04 ships `kernel.apparmor_restrict_unprivileged_userns=1`) — hit live on the first scheduled fire, issue #19 | Remove those three directives from the user-level unit only (they're security no-ops without root anyway; the root-based unit keeps them). Re-copy to `~/.config/systemd/user/`, `systemctl --user daemon-reload`, then `systemctl --user start appsflyer-daily.service` once to confirm and to load the day the failed fire missed. |
 
 ## 12. Rollback
 
@@ -333,6 +334,13 @@ had already spent most of that quota for 2 of the 4 app/attribution combos); the
 end-to-end. `appsflyer-daily.service` itself was never manually started (to avoid spending more of an
 already-thin quota) — its **first real fire is the scheduled one**, `2026-07-08` around `05:00`
 server-local time (confirmed via `systemctl --user list-timers`).
+
+> **Verification gap, learned the hard way (issue #19):** `systemd-run` transient preflights like the
+> ones below set only `WorkingDirectory`/`EnvironmentFile` — they do **not** carry the installed unit
+> file's hardening directives, so they can pass while the real unit is unstartable. The first scheduled
+> fire (2026-07-08) failed with `218/CAPABILITIES` on directives no transient check had ever exercised.
+> Always finish verification by starting the real service once (`systemctl --user start
+> appsflyer-daily.service`) — it's idempotent and doubles as the §8 smoke test.
 
 **Preflight/verification commands** — identical to §6/§8's `systemd-run` pattern, minus `--property=User=`/
 `Group=` (meaningless for a user-manager unit) and with the no-root paths substituted:
