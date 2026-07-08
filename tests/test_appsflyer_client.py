@@ -285,3 +285,32 @@ def test_fetch_events_raises_on_malformed_csv() -> None:
             media_source="Facebook Ads",
             event_names=["af_purchase"],
         )
+
+
+class _StubDataFrame:
+    """Minimal stand-in for a polars DataFrame exposing only what fetch_events
+    reads (.height) -- avoids generating an actual 1M-row CSV in a unit test.
+    """
+
+    height = 1_000_000
+
+
+@respx.mock
+def test_fetch_events_raises_on_1m_row_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #15: AppsFlyer's Pull API silently truncates raw-data exports beyond
+    1,000,000 rows with no error. fetch_events must fail loudly instead of
+    returning truncated data as if it were a complete, successful fetch.
+    """
+    monkeypatch.setattr(appsflyer_client.pl, "read_csv", lambda *args, **kwargs: _StubDataFrame())
+    respx.get(_url("id123", "non_organic")).mock(return_value=httpx.Response(200, text=SAMPLE_CSV))
+    with httpx.Client() as client, pytest.raises(AppsFlyerAPIError, match="1M-row cap"):
+        fetch_events(
+            client,
+            app_id="id123",
+            attribution_type="non_organic",
+            from_date=datetime.date(2026, 5, 20),
+            to_date=datetime.date(2026, 5, 20),
+            api_token="token",
+            media_source="Facebook Ads",
+            event_names=["af_purchase"],
+        )

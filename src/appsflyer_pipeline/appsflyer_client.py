@@ -134,12 +134,18 @@ def fetch_events(
     # all-null column guessed as Int64 in one chunk, Utf8 in another) must
     # not be allowed to diverge between them. transform.py applies real types.
     try:
-        return pl.read_csv(BytesIO(content), infer_schema_length=0)
+        df = pl.read_csv(BytesIO(content), infer_schema_length=0)
     except pl.exceptions.ComputeError as exc:
         raise AppsFlyerAPIError(
             f"AppsFlyer returned an unparseable CSV [{attribution_type}] for {app_id} "
             f"({from_date} to {to_date}): {exc}"
         ) from exc
+    if df.height >= 1_000_000:
+        raise AppsFlyerAPIError(
+            f"Report for {app_id} [{attribution_type}] {from_date}..{to_date} hit the "
+            f"Pull API 1M-row cap — data is likely truncated; split the window into smaller chunks."
+        )
+    return df
 
 
 def chunk_date_range(
