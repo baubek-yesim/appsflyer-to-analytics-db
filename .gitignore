@@ -31,3 +31,6 @@ htmlcov/
 # Mark Malovichko's original reference scripts (BAF-2 comment 62293) — local-only,
 # kept for review/reference, never committed (this repo is public).
 /reference/
+
+# Local git worktrees used for isolated feature-branch work.
+/.worktrees/
