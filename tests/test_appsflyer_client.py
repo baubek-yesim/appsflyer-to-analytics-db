@@ -262,3 +262,26 @@ def test_chunk_date_range_single_day() -> None:
 def test_chunk_date_range_rejects_inverted_range() -> None:
     with pytest.raises(ValueError, match="after"):
         chunk_date_range(datetime.date(2026, 5, 20), datetime.date(2026, 5, 1))
+
+
+@respx.mock
+def test_fetch_events_raises_on_malformed_csv() -> None:
+    """Issue #11: a ragged row (more fields than the header declares) makes
+    polars raise ComputeError with infer_schema_length=0 -- isolate it as
+    AppsFlyerAPIError so _process_window treats it like any other per-window
+    upstream-data failure, instead of killing the whole run.
+    """
+    respx.get(_url("id123", "non_organic")).mock(
+        return_value=httpx.Response(200, text="a,b,c\n1,2,3,4,5\n")
+    )
+    with httpx.Client() as client, pytest.raises(AppsFlyerAPIError, match="unparseable CSV"):
+        fetch_events(
+            client,
+            app_id="id123",
+            attribution_type="non_organic",
+            from_date=datetime.date(2026, 5, 20),
+            to_date=datetime.date(2026, 5, 20),
+            api_token="token",
+            media_source="Facebook Ads",
+            event_names=["af_purchase"],
+        )

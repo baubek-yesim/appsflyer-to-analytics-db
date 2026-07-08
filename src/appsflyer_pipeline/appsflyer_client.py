@@ -133,7 +133,13 @@ def fetch_events(
     # independently and later pl.concat'ed, so dtype inference (e.g. an
     # all-null column guessed as Int64 in one chunk, Utf8 in another) must
     # not be allowed to diverge between them. transform.py applies real types.
-    return pl.read_csv(BytesIO(content), infer_schema_length=0)
+    try:
+        return pl.read_csv(BytesIO(content), infer_schema_length=0)
+    except pl.exceptions.ComputeError as exc:
+        raise AppsFlyerAPIError(
+            f"AppsFlyer returned an unparseable CSV [{attribution_type}] for {app_id} "
+            f"({from_date} to {to_date}): {exc}"
+        ) from exc
 
 
 def chunk_date_range(
