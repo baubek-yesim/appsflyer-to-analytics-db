@@ -93,8 +93,12 @@ def check_connection(engine: Engine, table_name: str) -> ConnectionStatus:
 
 # Schema per Mark Malovichko's DDL (BAF-2 comment 62293); mirrored in sql/create_table.sql
 # for reference/manual execution — keep the two in sync if the schema ever changes.
+# `id`/PRIMARY KEY/idx_app_attr_time added 2026-07-08 (issue #14) — see
+# sql/migrations/2026-07-08-add-id-pk-and-index.sql for the one-time migration an
+# already-provisioned table needs (this template only affects fresh CREATE TABLE calls).
 _CREATE_TABLE_TEMPLATE = """
 CREATE TABLE IF NOT EXISTS `{table}` (
+    `id`                    BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     `event_time`            TIMESTAMP      NOT NULL,
     `install_time`          TIMESTAMP      NULL,
     `attributed_touch_time` TIMESTAMP      NULL,
@@ -111,7 +115,9 @@ CREATE TABLE IF NOT EXISTS `{table}` (
     `appsflyer_id`          VARCHAR(100)   NOT NULL,
     `customer_user_id`      VARCHAR(255)   NULL,
     `attribution_type`      VARCHAR(50)    NOT NULL,
-    `app_id`                VARCHAR(100)   NOT NULL
+    `app_id`                VARCHAR(100)   NOT NULL,
+    PRIMARY KEY (`id`),
+    KEY `idx_app_attr_time` (`app_id`, `attribution_type`, `event_time`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 """
 
