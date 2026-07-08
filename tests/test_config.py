@@ -49,3 +49,14 @@ def test_missing_required_field_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(ValidationError):
         Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize("field", ["APPSFLYER_APP_IDS", "APPSFLYER_EVENT_NAMES"])
+@pytest.mark.parametrize("raw", ["", "   ", " , ,"])
+def test_empty_csv_list_rejected(monkeypatch: pytest.MonkeyPatch, field: str, raw: str) -> None:
+    """A truncated/fat-fingered EnvironmentFile line (issue #9) must abort startup,
+    not degrade to a silent no-op run (empty app list) or an active window wipe
+    (empty event list -> transform's is_in([]) drops every row before the load).
+    """
+    with pytest.raises(ValidationError):
+        _settings(monkeypatch, **{field: raw})
