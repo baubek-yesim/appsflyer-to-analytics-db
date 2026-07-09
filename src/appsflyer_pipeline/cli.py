@@ -140,7 +140,12 @@ def _print_summary(summary: RunSummary) -> None:
 @app.command()
 def backfill(
     start_date: str | None = typer.Option(
-        None, "--start-date", help="ISO date (YYYY-MM-DD); defaults to 90 days before yesterday."
+        None,
+        "--start-date",
+        help=(
+            "ISO date (YYYY-MM-DD); defaults to a 90-day window ending at "
+            "--end-date (or yesterday)."
+        ),
     ),
     end_date: str | None = typer.Option(
         None, "--end-date", help="ISO date (YYYY-MM-DD); defaults to yesterday."

@@ -355,3 +355,58 @@ def test_run_daily_explicit_date_ignores_lookback(
         summary = run_daily(date=target, dry_run=True)
 
     assert all(r.start_date == target and r.end_date == target for r in summary.results)
+
+
+def test_run_backfill_warns_for_fully_beyond_floor_window_with_explicit_past_end(
+    monkeypatch: pytest.MonkeyPatch,
+    load_spy: list[dict[str, Any]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Issue #28: the floor used to be anchored to --end-date (default_start =
+    end - 89d), so a request whose WHOLE window lay beyond retention -- e.g. a
+    March repair run in July -- warned nothing. The floor must anchor to today.
+    """
+    _set_env(monkeypatch)
+    monkeypatch.setattr(pipeline, "_today", lambda: datetime.date(2026, 7, 9))
+    # floor = 2026-04-10; the whole window below is ~6 weeks beyond it
+
+    with caplog.at_level(logging.WARNING, logger="appsflyer_pipeline.pipeline"), respx.mock:
+        _mock_all_ok()
+        summary = run_backfill(
+            start=datetime.date(2026, 3, 1), end=datetime.date(2026, 3, 31), dry_run=True
+        )
+
+    assert any("retention floor" in record.message for record in caplog.records)
+    assert min(r.start_date for r in summary.results) == datetime.date(2026, 3, 1)  # not clamped
+
+
+def test_run_daily_explicit_old_date_warns(
+    monkeypatch: pytest.MonkeyPatch,
+    load_spy: list[dict[str, Any]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Issue #28: daily --date had no floor check at all."""
+    _set_env(monkeypatch)
+    monkeypatch.setattr(pipeline, "_today", lambda: datetime.date(2026, 7, 9))
+
+    with caplog.at_level(logging.WARNING, logger="appsflyer_pipeline.pipeline"), respx.mock:
+        _mock_all_ok()
+        summary = run_daily(date=datetime.date(2026, 2, 1), dry_run=True)
+
+    assert any("retention floor" in record.message for record in caplog.records)
+    assert all(r.start_date == datetime.date(2026, 2, 1) for r in summary.results)
+
+
+def test_run_daily_recent_date_does_not_warn(
+    monkeypatch: pytest.MonkeyPatch,
+    load_spy: list[dict[str, Any]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _set_env(monkeypatch)
+    monkeypatch.setattr(pipeline, "_today", lambda: datetime.date(2026, 7, 9))
+
+    with caplog.at_level(logging.WARNING, logger="appsflyer_pipeline.pipeline"), respx.mock:
+        _mock_all_ok()
+        run_daily(date=datetime.date(2026, 7, 5), dry_run=True)
+
+    assert not any("retention floor" in record.message for record in caplog.records)
