@@ -93,6 +93,19 @@ def _parse_optional_date(value: str | None, flag_name: str) -> datetime.date | N
         raise typer.Exit(code=1) from exc
 
 
+def _format_validation_error(exc: ValidationError) -> str:
+    """Render a config error without echoing collected env values (issue #27):
+    pydantic's default str() embeds input_value=<the collected settings dict>,
+    which leaks DB-password/API-token material into stderr and journald when
+    the EnvironmentFile is truncated -- #9's exact scenario.
+    """
+    problems = "; ".join(
+        f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}"
+        for err in exc.errors(include_url=False, include_input=False)
+    )
+    return f"invalid configuration: {problems}"
+
+
 def _get_settings_or_exit() -> Settings:
     """Load settings, rendering a bad/missing env var as a clean FAILED message
     (issue #12) instead of an uncaught pydantic ValidationError traceback --
@@ -101,7 +114,7 @@ def _get_settings_or_exit() -> Settings:
     try:
         return get_settings()
     except ValidationError as exc:
-        typer.echo(f"FAILED: {exc}", err=True)
+        typer.echo(f"FAILED: {_format_validation_error(exc)}", err=True)
         raise typer.Exit(code=1) from exc
 
 
@@ -142,7 +155,10 @@ def backfill(
 
     try:
         summary = run_backfill(start, end, dry_run=dry_run)
-    except (PipelineError, ValidationError) as exc:
+    except ValidationError as exc:
+        typer.echo(f"FAILED: {_format_validation_error(exc)}", err=True)
+        raise typer.Exit(code=1) from exc
+    except PipelineError as exc:
         typer.echo(f"FAILED: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
@@ -172,7 +188,10 @@ def daily(
 
     try:
         summary = run_daily(date=target_date, dry_run=dry_run)
-    except (PipelineError, ValidationError) as exc:
+    except ValidationError as exc:
+        typer.echo(f"FAILED: {_format_validation_error(exc)}", err=True)
+        raise typer.Exit(code=1) from exc
+    except PipelineError as exc:
         typer.echo(f"FAILED: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 

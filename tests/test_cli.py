@@ -5,11 +5,12 @@ import datetime
 import httpx
 import pytest
 import respx
+from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from appsflyer_pipeline import cli
 from appsflyer_pipeline.cli import app
-from appsflyer_pipeline.config import get_settings
+from appsflyer_pipeline.config import Settings, get_settings
 from appsflyer_pipeline.loader import ConnectionStatus, PipelineError
 from appsflyer_pipeline.pipeline import RunSummary
 
@@ -144,6 +145,76 @@ def test_create_table_reports_config_error_cleanly(monkeypatch: pytest.MonkeyPat
     get_settings.cache_clear()
     assert result.exit_code == 1
     assert "FAILED" in result.output
+
+
+def test_format_validation_error_never_includes_input_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #27: pydantic renders missing-field errors with
+    input_value=<the whole collected env dict>, whose repr tail exposes the
+    DB password when the EnvironmentFile is truncated right after
+    DB_PASSWORD (#9's exact scenario). The formatter must render field
+    locations and messages only. Built with _env_file=None so the
+    developer's real .env cannot fill the missing fields (see issue #32).
+    """
+    sentinel = "S3CRET-SENTINEL-VALUE-Tt8Rr"
+    for key in (
+        "DB_NAME",
+        "DB_TABLE",
+        "APPSFLYER_API_TOKEN",
+        "APPSFLYER_APP_IDS",
+        "APPSFLYER_MEDIA_SOURCE",
+        "APPSFLYER_EVENT_NAMES",
+        "APPSFLYER_DAILY_LOOKBACK_DAYS",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("DB_HOST", "db-host")
+    monkeypatch.setenv("DB_PORT", "3306")
+    monkeypatch.setenv("DB_USER", "user")
+    monkeypatch.setenv("DB_PASSWORD", sentinel)
+
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+    raw = str(excinfo.value)
+    clean = cli._format_validation_error(excinfo.value)
+    assert "T-SENTINEL-VALUE-Tt8Rr" in raw  # the visible leak portion
+    assert sentinel not in clean
+    assert clean.startswith("invalid configuration: ")
+    assert "db_name" in clean
+    assert "input_value" not in clean
+
+
+def test_check_connection_config_error_renders_clean(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wiring check for _get_settings_or_exit: an empty DB_NAME (issue #29's
+    validator -- an explicit env var, so the real .env can't mask it) must
+    render through the formatter, without pydantic's input_value= echo.
+    """
+    _set_cli_env(monkeypatch, DB_NAME="")
+
+    result = runner.invoke(app, ["check-connection"])
+
+    get_settings.cache_clear()
+    assert result.exit_code == 1
+    assert "FAILED: invalid configuration:" in result.output
+    assert "db_name" in result.output
+    assert "input_value" not in result.output
+
+
+def test_backfill_config_error_renders_clean(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wiring check for the backfill except-handler path (get_settings() is
+    called inside run_backfill, so the ValidationError surfaces there, not in
+    _get_settings_or_exit).
+    """
+    _set_cli_env(monkeypatch, APPSFLYER_MEDIA_SOURCE="")
+
+    result = runner.invoke(app, ["backfill", "--dry-run"])
+
+    get_settings.cache_clear()
+    assert result.exit_code == 1
+    assert "FAILED: invalid configuration:" in result.output
+    assert "appsflyer_media_source" in result.output
+    assert "input_value" not in result.output
 
 
 @respx.mock
