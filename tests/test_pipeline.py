@@ -410,3 +410,23 @@ def test_run_daily_recent_date_does_not_warn(
         run_daily(date=datetime.date(2026, 7, 5), dry_run=True)
 
     assert not any("retention floor" in record.message for record in caplog.records)
+
+
+def test_run_daily_date_exactly_at_floor_does_not_warn(
+    monkeypatch: pytest.MonkeyPatch,
+    load_spy: list[dict[str, Any]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The floor predicate is strict `<`: a date exactly AT the floor (and by
+    extension the default 90-day backfill window, whose start equals it) must
+    stay silent -- a `<=` regression would spam journald on every scheduled run.
+    """
+    _set_env(monkeypatch)
+    monkeypatch.setattr(pipeline, "_today", lambda: datetime.date(2026, 7, 9))
+    # retention_floor = 2026-07-09 - 90d = 2026-04-10
+
+    with caplog.at_level(logging.WARNING, logger="appsflyer_pipeline.pipeline"), respx.mock:
+        _mock_all_ok()
+        run_daily(date=datetime.date(2026, 4, 10), dry_run=True)
+
+    assert not any("retention floor" in record.message for record in caplog.records)

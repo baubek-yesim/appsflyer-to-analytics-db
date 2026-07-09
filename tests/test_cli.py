@@ -180,6 +180,7 @@ def test_format_validation_error_never_includes_input_values(
     clean = cli._format_validation_error(excinfo.value)
     assert "T-SENTINEL-VALUE-Tt8Rr" in raw  # the visible leak portion
     assert sentinel not in clean
+    assert "T-SENTINEL-VALUE-Tt8Rr" not in clean  # the truncated tail, the only form the leak takes
     assert clean.startswith("invalid configuration: ")
     assert "db_name" in clean
     assert "input_value" not in clean
