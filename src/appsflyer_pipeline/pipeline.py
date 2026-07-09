@@ -289,12 +289,25 @@ def run_daily(*, date: datetime.date | None = None, dry_run: bool = False) -> Ru
     original single-day pull. Idempotent delete-then-insert makes the daily
     rewrite of recent days safe by construction.
 
-    An explicit `date` is a targeted repair tool and always pulls exactly
-    [date, date], regardless of the lookback setting.
+    Window precedence (issue #50): an explicit `date` (targeted repair,
+    exactly [date, date]) wins over everything; otherwise a configured
+    APPSFLYER_EVENT_TIME_FROM/TO window wins over the lookback — it maps
+    straight onto the API's event-time from/to params, like the reference
+    script's from_date/to_date arguments, with TO defaulting to yesterday.
     """
     if date is not None:
         _warn_if_before_retention_floor(date, "daily --date")
         return _run_window(date, date, dry_run=dry_run)
+
+    settings = get_settings()
+    if settings.appsflyer_event_time_from is not None:
+        start = settings.appsflyer_event_time_from
+        end = settings.appsflyer_event_time_to or (_today() - datetime.timedelta(days=1))
+        if start > end:
+            raise PipelineError(f"APPSFLYER_EVENT_TIME_FROM {start} is after the window end {end}")
+        _warn_if_before_retention_floor(start, "APPSFLYER_EVENT_TIME_FROM")
+        return _run_window(start, end, dry_run=dry_run)
+
     end = _today() - datetime.timedelta(days=1)
-    start = end - datetime.timedelta(days=get_settings().appsflyer_daily_lookback_days - 1)
+    start = end - datetime.timedelta(days=settings.appsflyer_daily_lookback_days - 1)
     return _run_window(start, end, dry_run=dry_run)

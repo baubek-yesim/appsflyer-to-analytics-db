@@ -430,3 +430,87 @@ def test_run_daily_date_exactly_at_floor_does_not_warn(
         run_daily(date=datetime.date(2026, 4, 10), dry_run=True)
 
     assert not any("retention floor" in record.message for record in caplog.records)
+
+
+def test_run_daily_config_event_time_window_beats_lookback(
+    monkeypatch: pytest.MonkeyPatch, load_spy: list[dict[str, Any]]
+) -> None:
+    """Issue #50: APPSFLYER_EVENT_TIME_FROM/TO drive the flagless daily window
+    directly (the API's from/to filter on event time server-side), winning
+    over the lookback setting."""
+    _set_env(
+        monkeypatch,
+        APPSFLYER_EVENT_TIME_FROM="2026-06-20",
+        APPSFLYER_EVENT_TIME_TO="2026-06-25",
+        APPSFLYER_DAILY_LOOKBACK_DAYS="3",
+    )
+
+    with respx.mock:
+        _mock_all_ok()
+        summary = run_daily(dry_run=True)
+
+    assert summary.all_succeeded
+    assert all(
+        r.start_date == datetime.date(2026, 6, 20) and r.end_date == datetime.date(2026, 6, 25)
+        for r in summary.results
+    )
+
+
+def test_run_daily_event_time_to_defaults_to_yesterday(
+    monkeypatch: pytest.MonkeyPatch, load_spy: list[dict[str, Any]]
+) -> None:
+    _set_env(monkeypatch, APPSFLYER_EVENT_TIME_FROM="2026-07-05")
+    monkeypatch.setattr(pipeline, "_today", lambda: datetime.date(2026, 7, 9))
+
+    with respx.mock:
+        _mock_all_ok()
+        summary = run_daily(dry_run=True)
+
+    assert all(
+        r.start_date == datetime.date(2026, 7, 5) and r.end_date == datetime.date(2026, 7, 8)
+        for r in summary.results
+    )
+
+
+def test_run_daily_explicit_date_beats_event_time_window(
+    monkeypatch: pytest.MonkeyPatch, load_spy: list[dict[str, Any]]
+) -> None:
+    _set_env(monkeypatch, APPSFLYER_EVENT_TIME_FROM="2026-06-20")
+    target = datetime.date(2026, 7, 1)
+
+    with respx.mock:
+        _mock_all_ok()
+        summary = run_daily(date=target, dry_run=True)
+
+    assert all(r.start_date == target and r.end_date == target for r in summary.results)
+
+
+def test_run_daily_event_time_from_after_dynamic_end_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FROM beyond the dynamic yesterday-end is a runtime PipelineError — with
+    TO unset it cannot be caught at config-load time."""
+    _set_env(monkeypatch, APPSFLYER_EVENT_TIME_FROM="2026-07-15")
+    monkeypatch.setattr(pipeline, "_today", lambda: datetime.date(2026, 7, 9))
+
+    with pytest.raises(PipelineError, match="after the window end"):
+        run_daily(dry_run=True)
+
+
+def test_run_daily_old_event_time_from_warns(
+    monkeypatch: pytest.MonkeyPatch,
+    load_spy: list[dict[str, Any]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _set_env(
+        monkeypatch,
+        APPSFLYER_EVENT_TIME_FROM="2026-02-01",
+        APPSFLYER_EVENT_TIME_TO="2026-02-05",
+    )
+    monkeypatch.setattr(pipeline, "_today", lambda: datetime.date(2026, 7, 9))
+
+    with caplog.at_level(logging.WARNING, logger="appsflyer_pipeline.pipeline"), respx.mock:
+        _mock_all_ok()
+        run_daily(dry_run=True)
+
+    assert any("retention floor" in record.message for record in caplog.records)

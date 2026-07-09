@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import datetime
 from functools import lru_cache
 from typing import Annotated
 
-from pydantic import BeforeValidator, Field, field_validator
+from pydantic import BeforeValidator, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -81,10 +82,34 @@ class Settings(BaseSettings):
     # keep config free of package imports).
     appsflyer_daily_lookback_days: Annotated[int, Field(ge=1, le=90)] = 1
 
+    # Config-driven event-time window (issue #50, Mark's suggestion): the Pull
+    # API's from/to params filter on EVENT TIME server-side — these map onto
+    # them directly, like the reference script's from_date/to_date arguments.
+    # When FROM is set, the flagless `daily` run pulls exactly [FROM, TO or
+    # yesterday] instead of the lookback window; an explicit --date still wins
+    # over both. CAUTION: a standing FROM that ages past the API's ~35-day
+    # availability floor meets valid-header EMPTY responses, and the idempotent
+    # delete-then-insert would wipe already-loaded rows (issue #45) — the run
+    # warns (#28) but proceeds; the hard clamp is issue #49's scope.
+    appsflyer_event_time_from: datetime.date | None = None
+    appsflyer_event_time_to: datetime.date | None = None
+
     @field_validator("appsflyer_app_ids", "appsflyer_event_names", mode="before")
     @classmethod
     def _parse_csv_fields(cls, value: object) -> object:
         return _split_csv(value)
+
+    @model_validator(mode="after")
+    def _validate_event_time_window(self) -> Settings:
+        if self.appsflyer_event_time_to is not None and self.appsflyer_event_time_from is None:
+            raise ValueError("APPSFLYER_EVENT_TIME_TO requires APPSFLYER_EVENT_TIME_FROM")
+        if (
+            self.appsflyer_event_time_from is not None
+            and self.appsflyer_event_time_to is not None
+            and self.appsflyer_event_time_from > self.appsflyer_event_time_to
+        ):
+            raise ValueError("APPSFLYER_EVENT_TIME_FROM is after APPSFLYER_EVENT_TIME_TO")
+        return self
 
 
 @lru_cache
