@@ -128,14 +128,22 @@ def fetch_events(
         ) from exc
 
     if not content.strip():
-        return pl.DataFrame()
+        # Issue #26: a legitimate empty report always includes CSV headers
+        # (live-verified 2026-07-09: a quiet window returns a headers-only,
+        # 81-column CSV). A truly empty body is an upstream anomaly -- raising
+        # fails only this window and preserves its previously loaded rows,
+        # instead of flowing into load_events' delete-then-insert-nothing.
+        raise AppsFlyerAPIError(
+            f"AppsFlyer returned an empty response body [{attribution_type}] for {app_id} "
+            f"({from_date} to {to_date}) — a legitimate empty report always includes CSV headers"
+        )
     # infer_schema_length=0 forces every column to Utf8: chunks are read
     # independently and later pl.concat'ed, so dtype inference (e.g. an
     # all-null column guessed as Int64 in one chunk, Utf8 in another) must
     # not be allowed to diverge between them. transform.py applies real types.
     try:
         df = pl.read_csv(BytesIO(content), infer_schema_length=0)
-    except pl.exceptions.ComputeError as exc:
+    except (pl.exceptions.ComputeError, pl.exceptions.NoDataError) as exc:
         raise AppsFlyerAPIError(
             f"AppsFlyer returned an unparseable CSV [{attribution_type}] for {app_id} "
             f"({from_date} to {to_date}): {exc}"

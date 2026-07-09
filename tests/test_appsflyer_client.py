@@ -138,10 +138,17 @@ def test_fetch_events_never_sends_additional_fields() -> None:
 
 
 @respx.mock
-def test_fetch_events_empty_body_returns_empty_dataframe() -> None:
-    respx.get(_url("id123", "non_organic")).mock(return_value=httpx.Response(200, text=""))
-    with httpx.Client() as client:
-        df = fetch_events(
+@pytest.mark.parametrize("body", ["", "   \n  "])
+def test_fetch_events_raises_on_empty_body(body: str) -> None:
+    """Issue #26: a legitimate empty report always includes CSV headers
+    (live-verified 2026-07-09: a quiet window returns a headers-only,
+    81-column CSV). A truly empty/whitespace body must fail the window --
+    preserving its previously loaded rows -- instead of reading as
+    'no events' and wiping them via delete-then-insert-nothing.
+    """
+    respx.get(_url("id123", "non_organic")).mock(return_value=httpx.Response(200, text=body))
+    with httpx.Client() as client, pytest.raises(AppsFlyerAPIError, match="empty response body"):
+        fetch_events(
             client,
             app_id="id123",
             attribution_type="non_organic",
@@ -151,7 +158,29 @@ def test_fetch_events_empty_body_returns_empty_dataframe() -> None:
             media_source="Facebook Ads",
             event_names=["af_purchase"],
         )
-    assert df.is_empty()
+
+
+@respx.mock
+def test_fetch_events_raises_on_bom_only_body() -> None:
+    """A BOM-only body slips past bytes.strip() (the BOM is not ASCII
+    whitespace) and makes polars raise NoDataError -- which is NOT a
+    ComputeError subclass, so before issue #26 it escaped the parse guard
+    and crashed the whole run instead of failing one window.
+    """
+    respx.get(_url("id123", "non_organic")).mock(
+        return_value=httpx.Response(200, content=b"\xef\xbb\xbf")
+    )
+    with httpx.Client() as client, pytest.raises(AppsFlyerAPIError, match="unparseable CSV"):
+        fetch_events(
+            client,
+            app_id="id123",
+            attribution_type="non_organic",
+            from_date=datetime.date(2026, 5, 20),
+            to_date=datetime.date(2026, 5, 20),
+            api_token="token",
+            media_source="Facebook Ads",
+            event_names=["af_purchase"],
+        )
 
 
 @respx.mock
