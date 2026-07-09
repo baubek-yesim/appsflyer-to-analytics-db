@@ -102,6 +102,22 @@ def test_scalar_values_are_stripped(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.appsflyer_media_source == "Facebook Ads"
 
 
+def test_app_ids_default_to_production_roster(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #48: APPSFLYER_APP_IDS is optional — unset environments get the
+    canonical production roster (mirroring the reference scripts' hardcoded
+    list). Built with _env_file=None so a developer's real .env can't leak in.
+    An explicitly EMPTY value is still rejected (issue #9) — covered by
+    test_empty_csv_list_rejected above.
+    """
+    for key, value in BASE_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("APPSFLYER_APP_IDS", raising=False)
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.appsflyer_app_ids == ["com.yesimmobile", "id1458505230"]
+
+
 def test_daily_lookback_defaults_to_single_day(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _settings(monkeypatch).appsflyer_daily_lookback_days == 1
 
