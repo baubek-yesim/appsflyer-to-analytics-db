@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import datetime
+
 import pytest
 from pydantic import ValidationError
 
@@ -131,3 +133,28 @@ def test_daily_lookback_accepts_valid_depth(monkeypatch: pytest.MonkeyPatch) -> 
 def test_daily_lookback_out_of_bounds_rejected(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
     with pytest.raises(ValidationError):
         _settings(monkeypatch, APPSFLYER_DAILY_LOOKBACK_DAYS=raw)
+
+
+def test_event_time_window_parses_dates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #50: the config event-time window maps onto the API's from/to."""
+    settings = _settings(
+        monkeypatch,
+        APPSFLYER_EVENT_TIME_FROM="2026-06-04",
+        APPSFLYER_EVENT_TIME_TO="2026-07-08",
+    )
+    assert settings.appsflyer_event_time_from == datetime.date(2026, 6, 4)
+    assert settings.appsflyer_event_time_to == datetime.date(2026, 7, 8)
+
+
+def test_event_time_to_requires_from(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ValidationError):
+        _settings(monkeypatch, APPSFLYER_EVENT_TIME_TO="2026-07-08")
+
+
+def test_event_time_from_after_to_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ValidationError):
+        _settings(
+            monkeypatch,
+            APPSFLYER_EVENT_TIME_FROM="2026-07-08",
+            APPSFLYER_EVENT_TIME_TO="2026-06-04",
+        )
