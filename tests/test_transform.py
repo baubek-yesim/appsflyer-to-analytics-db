@@ -328,6 +328,7 @@ def test_transform_headers_only_response_returns_empty(
     pl.read_csv exactly like production to also pin polars' BOM handling.
     """
     df = pl.read_csv(BytesIO(HEADERS_ONLY_EXPORT), infer_schema_length=0)
+    assert df.columns[0] == "Attributed Touch Type"  # BOM stripped, not '﻿Attributed...'
     rows = transform_events(
         df,
         attribution_type=attribution_type,

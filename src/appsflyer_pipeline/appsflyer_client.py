@@ -103,8 +103,10 @@ def fetch_events(
 ) -> pl.DataFrame:
     """Fetch one app/attribution-type/date-range chunk as a raw DataFrame.
 
-    Returns an empty DataFrame (not an error) when AppsFlyer has no matching
-    events for the window — a legitimately common case, not a failure.
+    Returns an empty DataFrame when AppsFlyer has no matching events for the
+    window — delivered as a headers-only CSV, a legitimately common case. A
+    truly EMPTY response body is an upstream anomaly and raises
+    AppsFlyerAPIError instead (issue #26).
     """
     try:
         content = _fetch_csv(
