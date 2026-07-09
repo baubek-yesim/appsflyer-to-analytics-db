@@ -3,10 +3,12 @@ from __future__ import annotations
 import datetime
 import logging
 from decimal import Decimal
+from io import BytesIO
 
 import polars as pl
 import pytest
 
+from appsflyer_pipeline.appsflyer_client import AttributionType
 from appsflyer_pipeline.transform import TransformError, transform_events
 
 RAW_COLUMNS = [
@@ -272,6 +274,106 @@ def test_transform_empty_dataframe_returns_empty_list() -> None:
         event_names_filter=["af_purchase"],
     )
     assert rows == []
+
+
+# A headers-only export body, as the real API returns for a genuinely quiet
+# window (live-verified 2026-07-09: HTTP 200, UTF-8 BOM, all 81 columns,
+# zero data rows). Reconstructed here with every required raw column plus a
+# sample of the real export's extra columns -- the full 81-column line adds
+# no test signal and re-capturing it costs an API-quota report download.
+HEADERS_ONLY_EXPORT = (
+    b"\xef\xbb\xbf"
+    + (
+        ",".join(
+            [
+                "Attributed Touch Type",
+                "Attributed Touch Time",
+                "Install Time",
+                "Event Time",
+                "Event Name",
+                "Event Value",
+                "Event Revenue",
+                "Event Revenue Currency",
+                "Event Revenue USD",
+                "Event Source",
+                "Is Receipt Validated",
+                "Partner",
+                "Media Source",
+                "Channel",
+                "Campaign",
+                "Campaign ID",
+                "Adset",
+                "Adset ID",
+                "Ad",
+                "Ad ID",
+                "AppsFlyer ID",
+                "Customer User ID",
+                "Is Primary Attribution",
+                "Region",
+                "Cost Currency",
+            ]
+        ).encode()
+    )
+    + b"\n"
+)
+
+
+@pytest.mark.parametrize("attribution_type", ["non_organic", "retargeting"])
+def test_transform_headers_only_response_returns_empty(
+    attribution_type: AttributionType,
+) -> None:
+    """Issue #26: the one legitimate empty shape -- a headers-only CSV whose
+    columns include everything we require -- transforms to [] (so the loader's
+    delete+insert-0, with #10's wipe WARNING, still applies). Parsed through
+    pl.read_csv exactly like production to also pin polars' BOM handling.
+    """
+    df = pl.read_csv(BytesIO(HEADERS_ONLY_EXPORT), infer_schema_length=0)
+    rows = transform_events(
+        df,
+        attribution_type=attribution_type,
+        app_id="id1458505230",
+        media_source_filter="Facebook Ads",
+        event_names_filter=["af_purchase"],
+    )
+    assert rows == []
+
+
+@pytest.mark.parametrize(
+    "df",
+    [
+        pytest.param(
+            pl.read_csv(
+                BytesIO(b"Subscription package limitation. Contact your CSM"),
+                infer_schema_length=0,
+            ),
+            id="one-line-error-text",  # parses to a (0, 1) frame
+        ),
+        pytest.param(
+            pl.read_csv(
+                BytesIO(HEADERS_ONLY_EXPORT.replace(b"Event Time", b"Event Time Renamed")),
+                infer_schema_length=0,
+            ),
+            id="renamed-required-column",
+        ),
+        pytest.param(pl.DataFrame(), id="zero-column-empty-frame"),
+    ],
+)
+def test_transform_raises_on_zero_row_frame_with_missing_columns(
+    df: pl.DataFrame,
+) -> None:
+    """Issue #26: a 0-row frame whose headers do NOT include the required
+    columns is an anomaly (error-text body or schema drift), not a quiet
+    window -- before this fix it bypassed the schema guard via the is_empty
+    early-return and wiped the window downstream at exit 0.
+    """
+    with pytest.raises(TransformError, match="missing expected column"):
+        transform_events(
+            df,
+            attribution_type="non_organic",
+            app_id="id1458505230",
+            media_source_filter="Facebook Ads",
+            event_names_filter=["af_purchase"],
+        )
 
 
 def test_transform_collapses_exact_duplicate_rows(
