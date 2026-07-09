@@ -108,11 +108,11 @@ def test_fetch_events_sends_expected_params_and_headers() -> None:
 
 @respx.mock
 def test_fetch_events_never_sends_additional_fields() -> None:
-    """Dual attribution (issue #7): the `Is Primary Attribution` column that
-    transform.py filters on is a STANDARD v5 export column. Requesting it via
-    `additional_fields=is_primary_attribution` gets HTTP 400 "Unknown
-    additional field" from the real API (verified live, 2026-07-07) — this
-    pins the request shape so that regression can't quietly come back.
+    """Pins the request shape: no `additional_fields` param, ever. Standard v5
+    columns must not be requested that way — e.g. `is_primary_attribution` gets
+    HTTP 400 "Unknown additional field" from the real API (verified live,
+    2026-07-07, during #7; the filter itself was later removed by #47 but the
+    API fact stands).
     """
     ua_route = respx.get(_url("id123", "non_organic")).mock(
         return_value=httpx.Response(200, text=SAMPLE_CSV)
