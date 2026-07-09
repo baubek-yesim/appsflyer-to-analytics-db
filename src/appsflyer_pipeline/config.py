@@ -51,11 +51,18 @@ class Settings(BaseSettings):
 
     # AppsFlyer Pull API
     appsflyer_api_token: RequiredStr
-    # min_length=1 (issue #9): an empty value (e.g. a truncated line in the server's
-    # hand-edited EnvironmentFile) must fail startup loudly — an empty app list is a
-    # silent no-op run that exits 0, and an empty event list actively wipes windows
-    # (transform re-filters with is_in([]) and the loader then delete-then-inserts nothing).
-    appsflyer_app_ids: Annotated[CsvList, Field(min_length=1)]
+    # Canonical production roster, defaulted (issue #48) so environments without
+    # APPSFLYER_APP_IDS just work — mirrors the reference scripts' hardcoded list
+    # (which also carries id6753973280 / id1525236866 commented out as future
+    # candidates). Setting the env var overrides the default. min_length=1 stays
+    # (issue #9): an EXPLICITLY empty value — e.g. a truncated line in the
+    # server's hand-edited EnvironmentFile — must still fail startup loudly
+    # instead of degrading to a silent no-op run that exits 0 (an empty event
+    # list would even actively wipe windows via is_in([])).
+    appsflyer_app_ids: Annotated[CsvList, Field(min_length=1)] = [
+        "com.yesimmobile",
+        "id1458505230",
+    ]
 
     # Run parameters — defaulted to the BAF-2 acceptance criteria, overridable via env.
     appsflyer_media_source: RequiredStr = "Facebook Ads"
