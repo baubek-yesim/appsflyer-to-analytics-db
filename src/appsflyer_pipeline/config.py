@@ -5,7 +5,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Annotated
 
-from pydantic import Field, field_validator
+from pydantic import BeforeValidator, Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -14,6 +14,21 @@ def _split_csv(value: object) -> object:
         return [item.strip() for item in value.split(",") if item.strip()]
     return value
 
+
+def _strip_scalar(value: object) -> object:
+    if isinstance(value, str):
+        return value.strip()
+    return value
+
+
+# min_length=1 on required scalars (issue #29, same rationale as #9's list
+# fields): a truncated line in the server's hand-edited EnvironmentFile must
+# fail startup loudly, not degrade at runtime. Stripping runs BEFORE the
+# length check so whitespace-only values are rejected too -- and so edge
+# whitespace can't silently break the exact-match media-source filter.
+# db_password is deliberately exempt: an empty DB password is legitimate
+# (CI's mysql:8 service container uses one).
+RequiredStr = Annotated[str, BeforeValidator(_strip_scalar), Field(min_length=1)]
 
 # NoDecode: by default pydantic-settings JSON-decodes env values for list-typed
 # fields before validators run, which rejects a plain CSV string outright.
@@ -27,15 +42,15 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     # Analytics database (MariaDB/MySQL)
-    db_host: str
+    db_host: RequiredStr
     db_port: int = 3306
-    db_user: str
+    db_user: RequiredStr
     db_password: str
-    db_name: str
-    db_table: str
+    db_name: RequiredStr
+    db_table: RequiredStr
 
     # AppsFlyer Pull API
-    appsflyer_api_token: str
+    appsflyer_api_token: RequiredStr
     # min_length=1 (issue #9): an empty value (e.g. a truncated line in the server's
     # hand-edited EnvironmentFile) must fail startup loudly — an empty app list is a
     # silent no-op run that exits 0, and an empty event list actively wipes windows
@@ -43,7 +58,7 @@ class Settings(BaseSettings):
     appsflyer_app_ids: Annotated[CsvList, Field(min_length=1)]
 
     # Run parameters — defaulted to the BAF-2 acceptance criteria, overridable via env.
-    appsflyer_media_source: str = "Facebook Ads"
+    appsflyer_media_source: RequiredStr = "Facebook Ads"
     appsflyer_event_names: Annotated[CsvList, Field(min_length=1)] = [
         "af_purchase",
         "af_purchase_YC",

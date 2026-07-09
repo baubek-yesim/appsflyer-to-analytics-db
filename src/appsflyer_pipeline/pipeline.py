@@ -200,6 +200,27 @@ def _process_window(
     )
 
 
+def _warn_if_before_retention_floor(day: datetime.date, what: str) -> None:
+    """Issue #28: the floor anchors to TODAY (the API retains a trailing
+    window), never to a caller-provided end date -- an explicit past
+    --end-date used to skip this warning for fully-beyond-retention windows.
+    Warn-and-proceed is deliberate (RUNBOOK §9's probes rely on it). This is
+    the API's documented/HTTP-400 boundary; the *silent* empty-response
+    boundary is shorter -- see issue #45.
+    """
+    retention_floor = _today() - datetime.timedelta(days=MAX_RETENTION_DAYS)
+    if day < retention_floor:
+        logger.warning(
+            "Requested %s %s is earlier than the AppsFlyer Pull API's ~%d-day "
+            "retention floor (%s) — requests before the floor may return empty "
+            "data or an error. Proceeding anyway.",
+            what,
+            day,
+            MAX_RETENTION_DAYS,
+            retention_floor,
+        )
+
+
 def _run_window(start: datetime.date, end: datetime.date, *, dry_run: bool) -> RunSummary:
     """Shared core for run_backfill/run_daily: preflight, then a sequential loop."""
     settings = get_settings()
@@ -242,11 +263,10 @@ def run_backfill(
     """Historical backfill. Defaults to the full available AppsFlyer window:
     [yesterday - (MAX_RETENTION_DAYS - 1), yesterday].
 
-    If an explicit `start` predates that floor, this does NOT clamp it — it
-    logs a warning and proceeds. That lets an operator deliberately probe what
-    AppsFlyer actually returns before its retention floor, which is real
-    evidence toward resolving BAF-2's open 2025-01-01-vs-90-day conflict,
-    rather than something to silently prevent.
+    If an explicit `start` predates the retention floor (today minus
+    MAX_RETENTION_DAYS), this does NOT clamp it — it logs a warning and
+    proceeds, so an operator can deliberately probe what AppsFlyer actually
+    returns for old dates (see RUNBOOK §9 and issue #45).
     """
     end = end or (_today() - datetime.timedelta(days=1))
     default_start = end - datetime.timedelta(days=MAX_RETENTION_DAYS - 1)
@@ -254,16 +274,7 @@ def run_backfill(
 
     if start > end:
         raise PipelineError(f"start {start} is after end {end}")
-    if start < default_start:
-        logger.warning(
-            "Requested backfill start %s is earlier than the AppsFlyer Pull API's "
-            "~%d-day retention floor (%s) — requests before the floor may return "
-            "empty data or an error. Proceeding anyway; this is expected until "
-            "BAF-2's backfill-window conflict is resolved with the stakeholder.",
-            start,
-            MAX_RETENTION_DAYS,
-            default_start,
-        )
+    _warn_if_before_retention_floor(start, "backfill start")
 
     return _run_window(start, end, dry_run=dry_run)
 
@@ -282,6 +293,7 @@ def run_daily(*, date: datetime.date | None = None, dry_run: bool = False) -> Ru
     [date, date], regardless of the lookback setting.
     """
     if date is not None:
+        _warn_if_before_retention_floor(date, "daily --date")
         return _run_window(date, date, dry_run=dry_run)
     end = _today() - datetime.timedelta(days=1)
     start = end - datetime.timedelta(days=get_settings().appsflyer_daily_lookback_days - 1)
