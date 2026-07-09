@@ -208,6 +208,37 @@ def test_run_daily_isolates_transform_error(
     assert "TransformError" in failed.error
 
 
+@respx.mock
+def test_run_daily_isolates_error_text_200_body(
+    monkeypatch: pytest.MonkeyPatch, load_spy: list[dict[str, Any]]
+) -> None:
+    """Issue #26 end-to-end: an HTTP 200 whose body is a one-line error string
+    (parses to a 0-row, 1-column frame) fails exactly its own window via
+    TransformError -- it must never reach load_events, where rows=[] would
+    delete the window's existing data and report success.
+    """
+    _set_env(monkeypatch)
+    respx.get(_url("app1", "non_organic")).mock(
+        return_value=httpx.Response(200, text="Subscription package limitation. Contact your CSM")
+    )
+    respx.get(_url("app1", "retargeting")).mock(return_value=httpx.Response(200, text=SAMPLE_CSV))
+    respx.get(_url("app2", "non_organic")).mock(return_value=httpx.Response(200, text=SAMPLE_CSV))
+    respx.get(_url("app2", "retargeting")).mock(return_value=httpx.Response(200, text=SAMPLE_CSV))
+
+    summary = run_daily(date=datetime.date(2026, 5, 20))
+
+    assert not summary.all_succeeded
+    assert len(summary.failed) == 1
+    failed = summary.failed[0]
+    assert failed.app_id == "app1"
+    assert failed.attribution_type == "non_organic"
+    assert failed.error is not None
+    assert "TransformError" in failed.error
+    assert "missing expected column" in failed.error
+    assert len(summary.succeeded) == 3
+    assert len(load_spy) == 3  # the failed unit never reaches load_events
+
+
 def test_run_backfill_default_window_is_90_days(
     monkeypatch: pytest.MonkeyPatch, load_spy: list[dict[str, Any]]
 ) -> None:

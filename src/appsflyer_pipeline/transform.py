@@ -131,9 +131,6 @@ def transform_events(
     the retargeting pull already delivers as primary (issue #7 — loading both
     double-counts revenue).
     """
-    if df.is_empty():
-        return []
-
     required_raw = list(_COLUMN_MAP)
     if attribution_type == "non_organic":
         required_raw.append(_PRIMARY_ATTRIBUTION_COLUMN)
@@ -143,6 +140,14 @@ def transform_events(
             f"AppsFlyer response is missing expected column(s): {missing} "
             f"(attribution_type={attribution_type}, app_id={app_id})"
         )
+
+    # Issue #26: this early-return must stay BELOW the column check. Only a
+    # schema-valid empty (expected headers, zero rows -- the shape a genuinely
+    # quiet window returns, live-verified 2026-07-09) may yield []; an
+    # error-text body or a drifted header set parses to a 0-row frame too,
+    # and returning [] for those would wipe the window downstream at exit 0.
+    if df.is_empty():
+        return []
 
     if attribution_type == "non_organic":
         # Drop secondary copies of retargeting-attributed events (dual
