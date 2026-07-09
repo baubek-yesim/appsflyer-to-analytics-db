@@ -62,6 +62,46 @@ def test_empty_csv_list_rejected(monkeypatch: pytest.MonkeyPatch, field: str, ra
         _settings(monkeypatch, **{field: raw})
 
 
+@pytest.mark.parametrize(
+    "field",
+    [
+        "DB_HOST",
+        "DB_USER",
+        "DB_NAME",
+        "DB_TABLE",
+        "APPSFLYER_API_TOKEN",
+        "APPSFLYER_MEDIA_SOURCE",
+    ],
+)
+@pytest.mark.parametrize("raw", ["", "   "])
+def test_empty_scalar_rejected(monkeypatch: pytest.MonkeyPatch, field: str, raw: str) -> None:
+    """Issue #29 (extending #9 to scalars): a truncated line in the hand-edited
+    server EnvironmentFile must abort startup. The worst case is an empty
+    APPSFLYER_MEDIA_SOURCE -- the transform's exact-match re-filter then drops
+    every fetched row and each window delete-then-inserts nothing, wiping data
+    at exit 0. The DB scalars fail later and murkier; same fix for uniformity.
+    """
+    with pytest.raises(ValidationError):
+        _settings(monkeypatch, **{field: raw})
+
+
+def test_empty_db_password_still_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deliberate #29 exemption: an empty DB password is legitimate (CI's
+    mysql:8 service container authenticates root with one).
+    """
+    settings = _settings(monkeypatch, DB_PASSWORD="")
+    assert settings.db_password == ""
+
+
+def test_scalar_values_are_stripped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Edge whitespace is normalized before validation -- a trailing space in
+    APPSFLYER_MEDIA_SOURCE would otherwise silently break the exact-match
+    media-source filter (and 'min_length' alone would count the spaces).
+    """
+    settings = _settings(monkeypatch, APPSFLYER_MEDIA_SOURCE="  Facebook Ads  ")
+    assert settings.appsflyer_media_source == "Facebook Ads"
+
+
 def test_daily_lookback_defaults_to_single_day(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _settings(monkeypatch).appsflyer_daily_lookback_days == 1
 
