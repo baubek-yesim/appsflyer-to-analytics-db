@@ -5,6 +5,7 @@ Commands are added incrementally as the pipeline is built:
   - check-connection   Stage 1
   - create-table       Stage 2
   - backfill / daily   Stage 5
+  - create-view        issue #55
 """
 
 from __future__ import annotations
@@ -16,7 +17,13 @@ from pydantic import ValidationError
 
 from appsflyer_pipeline import __version__
 from appsflyer_pipeline.config import Settings, get_settings
-from appsflyer_pipeline.loader import PipelineError, check_connection, create_engine, create_table
+from appsflyer_pipeline.loader import (
+    PipelineError,
+    check_connection,
+    create_engine,
+    create_table,
+    create_view,
+)
 from appsflyer_pipeline.logging_config import configure_logging
 from appsflyer_pipeline.pipeline import RunSummary, run_backfill, run_daily
 
@@ -74,6 +81,20 @@ def create_table_command() -> None:
         raise typer.Exit(code=1) from exc
 
     typer.echo(f"Table `{settings.db_table}` is ready.")
+
+
+@app.command(name="create-view")
+def create_view_command() -> None:
+    """Create/replace the de-duplicated `<table>_deduped` view (idempotent)."""
+    settings = _get_settings_or_exit()
+    engine = create_engine(settings)
+    try:
+        create_view(engine, settings.db_table)
+    except PipelineError as exc:
+        typer.echo(f"FAILED: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(f"View `{settings.db_table}_deduped` is ready.")
 
 
 def _parse_optional_date(value: str | None, flag_name: str) -> datetime.date | None:

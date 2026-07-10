@@ -135,10 +135,21 @@ sudo systemd-run --wait --pty --collect --unit=appsflyer-preflight \
   --property=WorkingDirectory=/opt/appsflyer/appsflyer-to-analytics-db \
   --property=EnvironmentFile=/etc/appsflyer/appsflyer.env \
   /opt/appsflyer/appsflyer-to-analytics-db/.venv/bin/appsflyer-pipeline create-table
+
+sudo systemd-run --wait --pty --collect --unit=appsflyer-preflight \
+  --property=User=appsflyer --property=Group=appsflyer \
+  --property=WorkingDirectory=/opt/appsflyer/appsflyer-to-analytics-db \
+  --property=EnvironmentFile=/etc/appsflyer/appsflyer.env \
+  /opt/appsflyer/appsflyer-to-analytics-db/.venv/bin/appsflyer-pipeline create-view
 ```
 
 `check-connection` should print the MariaDB server version and the target table's status.
 `create-table` is idempotent — the table already exists in production, so expect "is ready.".
+`create-view` (issue #55) creates/replaces the `<table>_deduped` read view — also idempotent
+(`CREATE OR REPLACE VIEW`), so safe to re-run any time the base table's `is_primary_attribution`
+flags change. On a fresh install the view is created empty/meaningless until the table is
+populated by a backfill or daily run; run `create-view` again (or rely on `CREATE OR REPLACE`
+picking up the current definition) once real flags exist.
 
 **Schema note (2026-07-08, issue #14; updated 2026-07-10):** the live table gained an `id`
 PRIMARY KEY and an `idx_app_attr_time (app_id, attribution_type, event_time)` covering index for
@@ -169,6 +180,10 @@ needs the one-time, two-phase migration in
 4. **PHASE 2** — only once step 3 confirms zero NULLs, run the commented-out `ALTER TABLE ...
    MODIFY is_primary_attribution TINYINT(1) NOT NULL` at the bottom of the migration file to
    tighten the constraint to match the template.
+5. **Create/refresh the dedup view** — once the re-backfill has populated real flags, run
+   `appsflyer-pipeline create-view` (same `systemd-run` pattern as `create-table` above) so
+   `<table>_deduped` reflects the now-populated `is_primary_attribution` column. Idempotent —
+   safe to run again after any future re-backfill.
 
 ## 7. Install the unit files and enable the timer
 

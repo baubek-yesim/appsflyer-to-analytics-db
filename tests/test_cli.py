@@ -123,6 +123,33 @@ def test_create_table_reports_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "FAILED" in result.output
 
 
+def test_create_view_success_reports_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_cli_env(monkeypatch)
+    monkeypatch.setattr(cli, "create_view", lambda engine, table_name: None)
+
+    result = runner.invoke(app, ["create-view"])
+
+    get_settings.cache_clear()
+    assert result.exit_code == 0
+    assert "some_table_deduped" in result.output  # DB_TABLE in CLI_ENV is "some_table"
+    assert "is ready." in result.output
+
+
+def test_create_view_reports_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_cli_env(monkeypatch)
+
+    def _raise(engine: object, table_name: str) -> None:
+        raise PipelineError("boom")
+
+    monkeypatch.setattr(cli, "create_view", _raise)
+
+    result = runner.invoke(app, ["create-view"])
+
+    get_settings.cache_clear()
+    assert result.exit_code == 1
+    assert "FAILED: boom" in result.output
+
+
 def test_check_connection_reports_config_error_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
     """Issue #12: a bad/missing env var must fail the same clean way as
     backfill/daily (FAILED: ... + exit 1), not an uncaught pydantic

@@ -244,3 +244,89 @@ def test_load_events_logs_rowcounts_and_warns_on_wipe(
             start_date=window,
             end_date=window,
         )
+
+
+def test_create_view_dedups_pairs_keeps_singles() -> None:
+    """Issue #55: <table>_deduped keeps the primary row of a cross-attribution
+    pair and passes singletons through untouched. Uses a dedicated scratch table
+    it creates and drops, so it never touches real data.
+    """
+    from appsflyer_pipeline.loader import create_view
+
+    try:
+        settings = get_settings()
+        engine = create_engine(settings)
+        table = "__pytest_view_test__"
+        create_table(engine, table)
+    except Exception as exc:
+        pytest.skip(f"no usable database in this environment: {exc}")
+
+    def _row(af_id: str, attr: str, primary: bool) -> dict[str, object]:
+        return {
+            "event_time": datetime.datetime(2026, 6, 15, 0, 54, 43),
+            "install_time": None,
+            "attributed_touch_time": None,
+            "event_name": "af_purchase",
+            "event_revenue": Decimal("45.00"),
+            "media_source": "Facebook Ads",
+            "channel": None,
+            "campaign": None,
+            "campaign_id": None,
+            "adset": None,
+            "adset_id": None,
+            "ad": None,
+            "ad_id": None,
+            "appsflyer_id": af_id,
+            "customer_user_id": None,
+            "attribution_type": attr,
+            "is_primary_attribution": primary,
+            "app_id": "id1458505230",
+        }
+
+    try:
+        # A dual-attribution pair (same 3-field key): false in UA, true in retarget.
+        load_events(
+            engine,
+            table,
+            [_row("dup-af", "non_organic", False)],
+            app_id="id1458505230",
+            attribution_type="non_organic",
+            start_date=datetime.date(2026, 6, 15),
+            end_date=datetime.date(2026, 6, 15),
+        )
+        load_events(
+            engine,
+            table,
+            [_row("dup-af", "retargeting", True)],
+            app_id="id1458505230",
+            attribution_type="retargeting",
+            start_date=datetime.date(2026, 6, 15),
+            end_date=datetime.date(2026, 6, 15),
+        )
+        # A singleton with is_primary_attribution=false must be KEPT.
+        single = _row("single-af", "non_organic", False)
+        single["event_time"] = datetime.datetime(2026, 6, 16, 1, 0, 0)
+        load_events(
+            engine,
+            table,
+            [single],
+            app_id="id1458505230",
+            attribution_type="non_organic",
+            start_date=datetime.date(2026, 6, 16),
+            end_date=datetime.date(2026, 6, 16),
+        )
+
+        create_view(engine, table)
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT appsflyer_id, attribution_type "
+                    f"FROM `{table}_deduped` ORDER BY event_time"
+                )
+            ).fetchall()
+        # pair collapses to its primary (retargeting) row; singleton survives.
+        assert [tuple(r) for r in rows] == [("dup-af", "retargeting"), ("single-af", "non_organic")]
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text("DROP VIEW IF EXISTS `__pytest_view_test___deduped`"))
+            conn.execute(text("DROP TABLE IF EXISTS `__pytest_view_test__`"))
