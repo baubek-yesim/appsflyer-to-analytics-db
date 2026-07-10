@@ -98,6 +98,9 @@ def check_connection(engine: Engine, table_name: str) -> ConnectionStatus:
 # `id`/PRIMARY KEY/idx_app_attr_time added 2026-07-08 (issue #14) — see
 # sql/migrations/2026-07-08-add-id-pk-and-index.sql for the one-time migration an
 # already-provisioned table needs (this template only affects fresh CREATE TABLE calls).
+# `is_primary_attribution` added 2026-07-10 (issue #55) — see
+# sql/migrations/2026-07-10-add-is-primary-attribution.sql for the one-time migration an
+# already-provisioned table needs.
 _CREATE_TABLE_TEMPLATE = """
 CREATE TABLE IF NOT EXISTS `{table}` (
     `id`                    BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -117,6 +120,7 @@ CREATE TABLE IF NOT EXISTS `{table}` (
     `appsflyer_id`          VARCHAR(100)   NOT NULL,
     `customer_user_id`      VARCHAR(255)   NULL,
     `attribution_type`      VARCHAR(50)    NOT NULL,
+    `is_primary_attribution` TINYINT(1)    NOT NULL,
     `app_id`                VARCHAR(100)   NOT NULL,
     PRIMARY KEY (`id`),
     KEY `idx_app_attr_time` (`app_id`, `attribution_type`, `event_time`)
@@ -153,6 +157,7 @@ _INSERT_COLUMNS = (
     "appsflyer_id",
     "customer_user_id",
     "attribution_type",
+    "is_primary_attribution",
     "app_id",
 )
 

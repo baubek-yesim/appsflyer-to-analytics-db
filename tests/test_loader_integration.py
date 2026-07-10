@@ -65,6 +65,19 @@ def test_create_table_is_idempotent() -> None:
 
     assert status.table_exists is True
 
+    with engine.connect() as conn:
+        cols = {
+            r[0]
+            for r in conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = DATABASE() AND table_name = :t"
+                ),
+                {"t": settings.db_table},
+            )
+        }
+    assert "is_primary_attribution" in cols
+
 
 def test_load_events_is_idempotent_and_isolated() -> None:
     try:
@@ -97,6 +110,7 @@ def test_load_events_is_idempotent_and_isolated() -> None:
         "appsflyer_id": "test-af-id",
         "customer_user_id": None,
         "attribution_type": test_attribution,
+        "is_primary_attribution": True,
         "app_id": test_app_id,
     }
 
@@ -179,6 +193,7 @@ def test_load_events_logs_rowcounts_and_warns_on_wipe(
         "appsflyer_id": "test-af-id",
         "customer_user_id": None,
         "attribution_type": test_attribution,
+        "is_primary_attribution": True,
         "app_id": test_app_id,
     }
 

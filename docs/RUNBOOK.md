@@ -150,6 +150,26 @@ table on 2026-07-10 with `DATETIME` time columns (wiping all rows), and the repo
 That recreation did **not** carry over the #14 `id`/PRIMARY KEY/index — re-run the migration
 above to restore them.
 
+**Schema note (2026-07-10, issue #55):** `is_primary_attribution` (AppsFlyer's `Is Primary
+Attribution` flag) is now persisted. `create-table`/`sql/create_table.sql` include it as
+`TINYINT(1) NOT NULL` for any future fresh install, but the already-provisioned production table
+needs the one-time, two-phase migration in
+`sql/migrations/2026-07-10-add-is-primary-attribution.sql`:
+
+1. **PHASE 1** — `ALTER TABLE ... ADD COLUMN is_primary_attribution TINYINT(1) NULL AFTER
+   attribution_type`, run by hand against production. **Must be applied before the new code is
+   deployed there** — `load_events`' INSERT references `is_primary_attribution` unconditionally
+   once this task ships, so a deploy without PHASE 1 first fails every load with `Unknown column
+   'is_primary_attribution'`. Nullable (not `DEFAULT 0`) so existing rows read as "not yet
+   populated" rather than being mislabeled `false`.
+2. **Re-backfill** the retained ~90-day window (`backfill --start-date/--end-date`, see §9) to
+   populate real flags for existing rows via the normal delete-then-insert load path.
+3. **Verify zero NULLs**: `SELECT COUNT(*) FROM <table> WHERE is_primary_attribution IS NULL;`
+   must return `0` before proceeding.
+4. **PHASE 2** — only once step 3 confirms zero NULLs, run the commented-out `ALTER TABLE ...
+   MODIFY is_primary_attribution TINYINT(1) NOT NULL` at the bottom of the migration file to
+   tighten the constraint to match the template.
+
 ## 7. Install the unit files and enable the timer
 
 ```bash
