@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import zoneinfo
 from functools import lru_cache
 from typing import Annotated
 
@@ -94,10 +95,29 @@ class Settings(BaseSettings):
     appsflyer_event_time_from: datetime.date | None = None
     appsflyer_event_time_to: datetime.date | None = None
 
+    # Pull API `timezone` request param (issue #53): AppsFlyer returns report
+    # times in UTC unless the request names the app's configured timezone —
+    # then event times AND the from/to day boundaries follow that zone,
+    # matching the analytics team's Europe/Riga reference exports. Unset (the
+    # default) keeps today's UTC behavior. The value must match the app-level
+    # timezone setting in AppsFlyer exactly; a malformed zone name fails
+    # startup loudly, but a valid-but-wrong one cannot be caught client-side.
+    appsflyer_timezone: RequiredStr | None = None
+
     @field_validator("appsflyer_app_ids", "appsflyer_event_names", mode="before")
     @classmethod
     def _parse_csv_fields(cls, value: object) -> object:
         return _split_csv(value)
+
+    @field_validator("appsflyer_timezone")
+    @classmethod
+    def _validate_timezone_is_iana(cls, value: str | None) -> str | None:
+        if value is not None:
+            try:
+                zoneinfo.ZoneInfo(value)
+            except (zoneinfo.ZoneInfoNotFoundError, ValueError) as exc:
+                raise ValueError(f"not a valid IANA time zone name: {value!r}") from exc
+        return value
 
     @model_validator(mode="after")
     def _validate_event_time_window(self) -> Settings:

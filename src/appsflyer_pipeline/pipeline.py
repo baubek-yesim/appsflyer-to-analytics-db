@@ -139,6 +139,7 @@ def _process_window(
             api_token=settings.appsflyer_api_token,
             media_source=settings.appsflyer_media_source,
             event_names=settings.appsflyer_event_names,
+            timezone=settings.appsflyer_timezone,
         )
         fetched_rows = raw_df.height
 

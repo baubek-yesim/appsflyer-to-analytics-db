@@ -24,7 +24,7 @@ source data than the scripts themselves (see "Where the scripts would corrupt da
 |---|---|
 | URL | `https://hq1.appsflyer.com/api/raw-data/export/app/{app_id}/{endpoint}/v5` |
 | Endpoints | `in_app_events_report` (non_organic) / `in-app-events-retarget` (retargeting) |
-| Query params | `from`, `to`, `event_name=af_purchase,af_purchase_YC`, `media_source=Facebook Ads` — identical wire encoding verified |
+| Query params | `from`, `to`, `event_name=af_purchase,af_purchase_YC`, `media_source=Facebook Ads` — identical wire encoding verified. Deliberate addition since: optional `timezone` (issue #53), which the scripts never send — their pulls (and this pipeline's, when unset) return UTC times, 3h behind the analytics team's Europe/Riga references |
 | Auth/headers | `Authorization: Bearer <token>`, `Accept: text/csv` |
 | Timeout | 120 s per request |
 | Redirects | followed (requests: default; httpx: explicit `follow_redirects=True`) |

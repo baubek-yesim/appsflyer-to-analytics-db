@@ -62,6 +62,7 @@ def _fetch_csv(
     api_token: str,
     media_source: str,
     event_names: list[str],
+    timezone: str | None = None,
 ) -> bytes:
     endpoint = _ENDPOINT_BY_ATTRIBUTION[attribution_type]
     url = f"{_BASE_URL}/{app_id}/{endpoint}/v5"
@@ -71,6 +72,10 @@ def _fetch_csv(
         "event_name": ",".join(event_names),
         "media_source": media_source,
     }
+    if timezone is not None:
+        # Issue #53: without this param AppsFlyer reports in UTC; with it, event
+        # times and the from/to day boundaries follow the app's configured zone.
+        params["timezone"] = timezone
     headers = {
         "Authorization": f"Bearer {api_token}",
         "Accept": "text/csv",
@@ -95,6 +100,7 @@ def fetch_events(
     api_token: str,
     media_source: str,
     event_names: list[str],
+    timezone: str | None = None,
 ) -> pl.DataFrame:
     """Fetch one app/attribution-type/date-range chunk as a raw DataFrame.
 
@@ -102,6 +108,10 @@ def fetch_events(
     window — delivered as a headers-only CSV, a legitimately common case. A
     truly EMPTY response body is an upstream anomaly and raises
     AppsFlyerAPIError instead (issue #26).
+
+    `timezone` (issue #53) selects the timezone AppsFlyer expresses the report
+    in — both the event-time values and the from/to day boundaries. None (the
+    default) means UTC.
     """
     try:
         content = _fetch_csv(
@@ -113,6 +123,7 @@ def fetch_events(
             api_token=api_token,
             media_source=media_source,
             event_names=event_names,
+            timezone=timezone,
         )
     except httpx.HTTPStatusError as exc:
         raise AppsFlyerAPIError(
