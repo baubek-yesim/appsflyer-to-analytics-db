@@ -93,15 +93,17 @@ def check_connection(engine: Engine, table_name: str) -> ConnectionStatus:
 
 # Schema per Mark Malovichko's DDL (BAF-2 comment 62293); mirrored in sql/create_table.sql
 # for reference/manual execution — keep the two in sync if the schema ever changes.
+# Time columns are DATETIME, not TIMESTAMP (schema owner's decision, applied to production
+# 2026-07-10): stores the literal wall-clock value with no session-timezone conversion.
 # `id`/PRIMARY KEY/idx_app_attr_time added 2026-07-08 (issue #14) — see
 # sql/migrations/2026-07-08-add-id-pk-and-index.sql for the one-time migration an
 # already-provisioned table needs (this template only affects fresh CREATE TABLE calls).
 _CREATE_TABLE_TEMPLATE = """
 CREATE TABLE IF NOT EXISTS `{table}` (
     `id`                    BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    `event_time`            TIMESTAMP      NOT NULL,
-    `install_time`          TIMESTAMP      NULL,
-    `attributed_touch_time` TIMESTAMP      NULL,
+    `event_time`            DATETIME       NOT NULL,
+    `install_time`          DATETIME       NULL,
+    `attributed_touch_time` DATETIME       NULL,
     `event_name`            VARCHAR(100)   NOT NULL,
     `event_revenue`         DECIMAL(18,4)  NULL,
     `media_source`          VARCHAR(100)   NULL,

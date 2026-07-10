@@ -133,12 +133,15 @@ sudo systemd-run --wait --pty --collect --unit=appsflyer-preflight \
 `check-connection` should print the MariaDB server version and the target table's status.
 `create-table` is idempotent — the table already exists in production, so expect "is ready.".
 
-**Schema note (2026-07-08, issue #14):** the live table gained an `id` PRIMARY KEY and an
-`idx_app_attr_time (app_id, attribution_type, event_time)` covering index for the DELETE/query
-pattern `load_events` already uses — via the one-time migration in
+**Schema note (2026-07-08, issue #14; updated 2026-07-10):** the live table gained an `id`
+PRIMARY KEY and an `idx_app_attr_time (app_id, attribution_type, event_time)` covering index for
+the DELETE/query pattern `load_events` already uses — via the one-time migration in
 `sql/migrations/2026-07-08-add-id-pk-and-index.sql`, run once by hand against the already-existing
-production table. `create-table`/`sql/create_table.sql` include both in any future fresh install;
-`TIMESTAMP` vs `DATETIME` remains an open question pending the schema owner's sign-off.
+production table. `create-table`/`sql/create_table.sql` include both in any future fresh install.
+The `TIMESTAMP` vs `DATETIME` question is resolved: the schema owner recreated the production
+table on 2026-07-10 with `DATETIME` time columns (wiping all rows), and the repo DDL matches.
+That recreation did **not** carry over the #14 `id`/PRIMARY KEY/index — re-run the migration
+above to restore them.
 
 ## 7. Install the unit files and enable the timer
 
