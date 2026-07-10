@@ -453,3 +453,27 @@ def test_transform_raises_on_conflicting_duplicate_rows() -> None:
             media_source_filter="Facebook Ads",
             event_names_filter=["af_purchase", "af_purchase_YC"],
         )
+
+
+def test_transform_raises_on_primary_flag_conflict_within_report() -> None:
+    """Issue #55 widened the dedup conflict surface: `is_primary_attribution`
+    now participates in `_dedupe_rows`' exact-equality check, so two rows
+    sharing the key (event_time, event_name, appsflyer_id) that differ ONLY on
+    `Is Primary Attribution` are no longer a safe-to-collapse duplicate and must
+    fail loudly. Within one report an event is attributed once, so this should
+    not occur in real data — but the fail-loud guard must hold.
+    """
+    df = _df(
+        [
+            _raw_row(**{"Is Primary Attribution": "true"}),
+            _raw_row(**{"Is Primary Attribution": "false"}),
+        ]
+    )
+    with pytest.raises(TransformError, match="Conflicting duplicate"):
+        transform_events(
+            df,
+            attribution_type="non_organic",
+            app_id="id1458505230",
+            media_source_filter="Facebook Ads",
+            event_names_filter=["af_purchase", "af_purchase_YC"],
+        )
