@@ -39,6 +39,7 @@ _COLUMN_MAP: dict[str, str] = {
     "Ad ID": "ad_id",
     "AppsFlyer ID": "appsflyer_id",
     "Customer User ID": "customer_user_id",
+    "Is Primary Attribution": "is_primary_attribution",
 }
 
 _TIMESTAMP_COLUMNS = ("event_time", "install_time", "attributed_touch_time")
@@ -65,6 +66,16 @@ def _parse_revenue(value: str | None) -> Decimal | None:
         return Decimal(value)
     except InvalidOperation as exc:
         raise TransformError(f"Unexpected event_revenue value: {value!r}") from exc
+
+
+def _parse_bool(value: str | None) -> bool:
+    if value is not None:
+        normalized = value.strip().lower()
+        if normalized == "true":
+            return True
+        if normalized == "false":
+            return False
+    raise TransformError(f"Unexpected is_primary_attribution value: {value!r}")
 
 
 def _dedupe_rows(
@@ -121,12 +132,12 @@ def transform_events(
     and adds `attribution_type`/`app_id`, which AppsFlyer's export doesn't know.
 
     ALL rows are loaded regardless of `Is Primary Attribution` (issue #47,
-    data-analytics decision on #46, reversing #7's filter): dedup follows
-    Mark's key (event_time, event_name, appsflyer_id, attribution_type) via
-    `_dedupe_rows`, and since `attribution_type` is part of that key, a
-    dual-attributed purchase legitimately appears once per report —
-    attribution_type is a dimension, and cross-attribution sums count such
-    purchases in both dimensions by design.
+    data-analytics decision on #46, reversing #7's filter). Issue #55 now also
+    *persists* the flag as `is_primary_attribution` (still never filters on it):
+    it is a standard column in both the non_organic and retargeting exports
+    (live-verified 2026-07-10), and the `<table>_deduped` view uses it to collapse
+    a dual-attributed purchase (false in the UA pull, true in its retargeting
+    twin) to one row while keeping every single-attribution row.
     """
     missing = [raw for raw in _COLUMN_MAP if raw not in df.columns]
     if missing:
@@ -154,6 +165,7 @@ def transform_events(
         for ts_col in _TIMESTAMP_COLUMNS:
             row[ts_col] = _parse_timestamp(row[ts_col])
         row["event_revenue"] = _parse_revenue(row["event_revenue"])
+        row["is_primary_attribution"] = _parse_bool(row["is_primary_attribution"])
         row["attribution_type"] = attribution_type
         row["app_id"] = app_id
 

@@ -135,10 +135,21 @@ sudo systemd-run --wait --pty --collect --unit=appsflyer-preflight \
   --property=WorkingDirectory=/opt/appsflyer/appsflyer-to-analytics-db \
   --property=EnvironmentFile=/etc/appsflyer/appsflyer.env \
   /opt/appsflyer/appsflyer-to-analytics-db/.venv/bin/appsflyer-pipeline create-table
+
+sudo systemd-run --wait --pty --collect --unit=appsflyer-preflight \
+  --property=User=appsflyer --property=Group=appsflyer \
+  --property=WorkingDirectory=/opt/appsflyer/appsflyer-to-analytics-db \
+  --property=EnvironmentFile=/etc/appsflyer/appsflyer.env \
+  /opt/appsflyer/appsflyer-to-analytics-db/.venv/bin/appsflyer-pipeline create-view
 ```
 
 `check-connection` should print the MariaDB server version and the target table's status.
 `create-table` is idempotent — the table already exists in production, so expect "is ready.".
+`create-view` (issue #55) creates/replaces the `<table>_deduped` read view — also idempotent
+(`CREATE OR REPLACE VIEW`), so safe to re-run any time the base table's `is_primary_attribution`
+flags change. On a fresh install the view is created empty/meaningless until the table is
+populated by a backfill or daily run; run `create-view` again (or rely on `CREATE OR REPLACE`
+picking up the current definition) once real flags exist.
 
 **Schema note (2026-07-08, issue #14; updated 2026-07-10):** the live table gained an `id`
 PRIMARY KEY and an `idx_app_attr_time (app_id, attribution_type, event_time)` covering index for
@@ -149,6 +160,61 @@ The `TIMESTAMP` vs `DATETIME` question is resolved: the schema owner recreated t
 table on 2026-07-10 with `DATETIME` time columns (wiping all rows), and the repo DDL matches.
 That recreation did **not** carry over the #14 `id`/PRIMARY KEY/index — re-run the migration
 above to restore them.
+
+**Schema note (2026-07-10, issue #55):** `is_primary_attribution` (AppsFlyer's `Is Primary
+Attribution` flag) is now persisted. `create-table`/`sql/create_table.sql` include it as
+`TINYINT(1) NOT NULL` for any future fresh install, but the already-provisioned production table
+needs the one-time, two-phase migration in
+`sql/migrations/2026-07-10-add-is-primary-attribution.sql`:
+
+1. **PHASE 1** — `ALTER TABLE ... ADD COLUMN is_primary_attribution TINYINT(1) NULL AFTER
+   attribution_type`, run by hand against production. **Must be applied before the new code is
+   deployed there** — `load_events`' INSERT references `is_primary_attribution` unconditionally
+   once this task ships, so a deploy without PHASE 1 first fails every load with `Unknown column
+   'is_primary_attribution'`. Nullable (not `DEFAULT 0`) so existing rows read as "not yet
+   populated" rather than being mislabeled `false`.
+2. **Re-backfill** the retained ~90-day window (`backfill --start-date/--end-date`, see §9) to
+   populate real flags for existing rows via the normal delete-then-insert load path.
+3. **Verify zero NULLs**: `SELECT COUNT(*) FROM <table> WHERE is_primary_attribution IS NULL;`
+   must return `0` before proceeding.
+4. **PHASE 2** — only once step 3 confirms zero NULLs, run the commented-out `ALTER TABLE ...
+   MODIFY is_primary_attribution TINYINT(1) NOT NULL` at the bottom of the migration file to
+   tighten the constraint to match the template.
+5. **Create/refresh the dedup view** — run `appsflyer-pipeline create-view` (same `systemd-run`
+   pattern as `create-table` above) so `<table>_deduped` reflects the `is_primary_attribution`
+   column. `CREATE OR REPLACE VIEW` is idempotent, so exactly when this runs relative to steps 1-4
+   is flexible — it only returns meaningful (non-`NULL`-flag) rows once step 2's re-backfill has
+   populated real values, and it's safe to re-run any time after. See "Ops sequence for the #55
+   rollout" below for the authoritative same-day order.
+
+### Ops sequence for the #55 rollout (ordered)
+
+The steps above are individually idempotent/safe, but doing them in the wrong order (or too
+slowly) breaks the deploy or loses data. Run them in exactly this order, same day:
+
+1. Migration **PHASE 1** (above) against production — adds the nullable column.
+2. Deploy the new code — `git pull` + `uv sync --frozen --no-dev` per §13. Must happen after
+   PHASE 1 (see step 1 above / the migration section for why).
+3. `create-view` (above, §6's preflight block) — safe to run now even though the table's
+   `is_primary_attribution` values are still `NULL`; it only installs the view definition
+   (`CREATE OR REPLACE VIEW`), so it's fine to run again after step 4 repopulates real flags.
+4. **Re-backfill `06-05 → 07-09` the same day** — `backfill --start-date 2026-06-05 --end-date
+   2026-07-09` (§9's invocation pattern) to repopulate all rows with real flags via the normal
+   delete-then-insert path.
+   ⚠️ **Timing — issue #45's floor:** the oldest day the Pull API will still return sits at the
+   ~35-day availability floor, which slides forward one day at a time; as of 2026-07-10 that floor
+   is `06-05`. If this step slips to a later day, `06-05` falls out of range, AppsFlyer returns an
+   empty result for that window, and delete-then-insert would **wipe** the existing `06-05` rows
+   instead of refreshing them. Do this the same day as steps 1-3, not "later this week."
+5. **Verify**, before proceeding:
+   - `SELECT COUNT(*) FROM <table> WHERE is_primary_attribution IS NULL;` → must return `0`.
+   - Each of the 43 known non_organic/retargeting pairs collapses to exactly one row in
+     `<table>_deduped`: `SELECT event_time, event_name, appsflyer_id, COUNT(*) FROM
+     <table>_deduped GROUP BY 1, 2, 3 HAVING COUNT(*) > 1;` → zero rows returned.
+6. Migration **PHASE 2** (above) — only once step 5 confirms zero NULLs.
+
+Steps 1 and 6 are the two halves of `sql/migrations/2026-07-10-add-is-primary-attribution.sql`;
+see the numbered list above for exactly what each `ALTER TABLE` does.
 
 ## 7. Install the unit files and enable the timer
 

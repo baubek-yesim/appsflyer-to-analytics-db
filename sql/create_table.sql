@@ -11,6 +11,9 @@
 -- table needs the one-time migration in sql/migrations/2026-07-08-add-id-pk-and-index.sql
 -- instead — CREATE TABLE IF NOT EXISTS does not retrofit an existing table. The production
 -- table recreated on 2026-07-10 lacks them (it predates re-running that migration).
+--
+-- `is_primary_attribution` added 2026-07-10 (issue #55); an already-provisioned table needs
+-- the one-time migration in sql/migrations/2026-07-10-add-is-primary-attribution.sql instead.
 
 CREATE TABLE IF NOT EXISTS `appsflyer_events_fb` (
     `id`                    BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -30,6 +33,7 @@ CREATE TABLE IF NOT EXISTS `appsflyer_events_fb` (
     `appsflyer_id`          VARCHAR(100)   NOT NULL,
     `customer_user_id`      VARCHAR(255)   NULL,
     `attribution_type`      VARCHAR(50)    NOT NULL,
+    `is_primary_attribution` TINYINT(1)    NOT NULL,
     `app_id`                VARCHAR(100)   NOT NULL,
     PRIMARY KEY (`id`),
     KEY `idx_app_attr_time` (`app_id`, `attribution_type`, `event_time`)

@@ -12,6 +12,7 @@ from appsflyer_pipeline.loader import (
     _validate_identifier,
     create_engine,
     create_table,
+    create_view,
     load_events,
 )
 
@@ -49,6 +50,13 @@ def test_create_table_wraps_sqlalchemy_error() -> None:
     engine = _unreachable_engine()
     with pytest.raises(PipelineError, match="Could not create table") as excinfo:
         create_table(engine, "some_table")
+    assert isinstance(excinfo.value.__cause__, SQLAlchemyError)
+
+
+def test_create_view_wraps_sqlalchemy_error() -> None:
+    engine = _unreachable_engine()
+    with pytest.raises(PipelineError, match="Could not create view") as excinfo:
+        create_view(engine, "some_table")
     assert isinstance(excinfo.value.__cause__, SQLAlchemyError)
 
 

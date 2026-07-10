@@ -98,6 +98,9 @@ def check_connection(engine: Engine, table_name: str) -> ConnectionStatus:
 # `id`/PRIMARY KEY/idx_app_attr_time added 2026-07-08 (issue #14) — see
 # sql/migrations/2026-07-08-add-id-pk-and-index.sql for the one-time migration an
 # already-provisioned table needs (this template only affects fresh CREATE TABLE calls).
+# `is_primary_attribution` added 2026-07-10 (issue #55) — see
+# sql/migrations/2026-07-10-add-is-primary-attribution.sql for the one-time migration an
+# already-provisioned table needs.
 _CREATE_TABLE_TEMPLATE = """
 CREATE TABLE IF NOT EXISTS `{table}` (
     `id`                    BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -117,6 +120,7 @@ CREATE TABLE IF NOT EXISTS `{table}` (
     `appsflyer_id`          VARCHAR(100)   NOT NULL,
     `customer_user_id`      VARCHAR(255)   NULL,
     `attribution_type`      VARCHAR(50)    NOT NULL,
+    `is_primary_attribution` TINYINT(1)    NOT NULL,
     `app_id`                VARCHAR(100)   NOT NULL,
     PRIMARY KEY (`id`),
     KEY `idx_app_attr_time` (`app_id`, `attribution_type`, `event_time`)
@@ -153,8 +157,42 @@ _INSERT_COLUMNS = (
     "appsflyer_id",
     "customer_user_id",
     "attribution_type",
+    "is_primary_attribution",
     "app_id",
 )
+
+
+_VIEW_COLUMNS_SQL = ", ".join(f"`{c}`" for c in _INSERT_COLUMNS)
+
+# Issue #55: a de-duplicated read over the base table. Collapses a dual-attributed
+# purchase (same event_time/event_name/appsflyer_id in both the UA and retargeting
+# reports) to its primary row, while passing single-attribution rows through
+# untouched. Window functions require MariaDB >=10.2 / MySQL 8 (both satisfied).
+_CREATE_VIEW_TEMPLATE = f"""
+CREATE OR REPLACE VIEW `{{view}}` AS
+SELECT {_VIEW_COLUMNS_SQL}
+FROM (
+    SELECT {_VIEW_COLUMNS_SQL},
+           ROW_NUMBER() OVER (
+               PARTITION BY `event_time`, `event_name`, `appsflyer_id`
+               ORDER BY `is_primary_attribution` DESC, `attribution_type` ASC
+           ) AS _dedup_rn
+    FROM `{{table}}`
+) ranked
+WHERE _dedup_rn = 1
+"""
+
+
+def create_view(engine: Engine, table_name: str) -> None:
+    """Create/replace the `<table_name>_deduped` view (idempotent)."""
+    table_name = _validate_identifier(table_name)
+    view_name = _validate_identifier(f"{table_name}_deduped")
+    ddl = _CREATE_VIEW_TEMPLATE.format(view=view_name, table=table_name)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(ddl))
+    except SQLAlchemyError as exc:
+        raise PipelineError(f"Could not create view `{view_name}`: {exc}") from exc
 
 
 def load_events(
