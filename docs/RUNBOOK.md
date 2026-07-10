@@ -185,6 +185,37 @@ needs the one-time, two-phase migration in
    `<table>_deduped` reflects the now-populated `is_primary_attribution` column. Idempotent —
    safe to run again after any future re-backfill.
 
+### Ops sequence for the #55 rollout (ordered)
+
+The steps above are individually idempotent/safe, but doing them in the wrong order (or too
+slowly) breaks the deploy or loses data. Run them in exactly this order, same day:
+
+1. Migration **PHASE 1** (above) against production — adds the nullable column.
+2. Deploy the new code — `git pull` + `uv sync --frozen --no-dev` per §13. Must happen after
+   PHASE 1: `load_events`' INSERT references `is_primary_attribution` unconditionally, so deployed
+   code running against a table still missing the column fails every load with `Unknown column
+   'is_primary_attribution'`.
+3. `create-view` (above, §6's preflight block) — safe to run now even though the table's
+   `is_primary_attribution` values are still `NULL`; it only installs the view definition
+   (`CREATE OR REPLACE VIEW`), so it's fine to run again after step 4 repopulates real flags.
+4. **Re-backfill `06-05 → 07-09` the same day** — `backfill --start-date 2026-06-05 --end-date
+   2026-07-09` (§9's invocation pattern) to repopulate all rows with real flags via the normal
+   delete-then-insert path.
+   ⚠️ **Timing — issue #45's floor:** the oldest day the Pull API will still return sits at the
+   ~35-day availability floor, which slides forward one day at a time; as of 2026-07-10 that floor
+   is `06-05`. If this step slips to a later day, `06-05` falls out of range, AppsFlyer returns an
+   empty result for that window, and delete-then-insert would **wipe** the existing `06-05` rows
+   instead of refreshing them. Do this the same day as steps 1-3, not "later this week."
+5. **Verify**, before proceeding:
+   - `SELECT COUNT(*) FROM <table> WHERE is_primary_attribution IS NULL;` → must return `0`.
+   - Each of the 43 known non_organic/retargeting pairs collapses to exactly one row in
+     `<table>_deduped`: `SELECT event_time, event_name, appsflyer_id, COUNT(*) FROM
+     <table>_deduped GROUP BY 1, 2, 3 HAVING COUNT(*) > 1;` → zero rows returned.
+6. Migration **PHASE 2** (above) — only once step 5 confirms zero NULLs.
+
+Steps 1 and 6 are the two halves of `sql/migrations/2026-07-10-add-is-primary-attribution.sql`;
+see the numbered list above for exactly what each `ALTER TABLE` does.
+
 ## 7. Install the unit files and enable the timer
 
 ```bash
