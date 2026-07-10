@@ -180,10 +180,12 @@ needs the one-time, two-phase migration in
 4. **PHASE 2** — only once step 3 confirms zero NULLs, run the commented-out `ALTER TABLE ...
    MODIFY is_primary_attribution TINYINT(1) NOT NULL` at the bottom of the migration file to
    tighten the constraint to match the template.
-5. **Create/refresh the dedup view** — once the re-backfill has populated real flags, run
-   `appsflyer-pipeline create-view` (same `systemd-run` pattern as `create-table` above) so
-   `<table>_deduped` reflects the now-populated `is_primary_attribution` column. Idempotent —
-   safe to run again after any future re-backfill.
+5. **Create/refresh the dedup view** — run `appsflyer-pipeline create-view` (same `systemd-run`
+   pattern as `create-table` above) so `<table>_deduped` reflects the `is_primary_attribution`
+   column. `CREATE OR REPLACE VIEW` is idempotent, so exactly when this runs relative to steps 1-4
+   is flexible — it only returns meaningful (non-`NULL`-flag) rows once step 2's re-backfill has
+   populated real values, and it's safe to re-run any time after. See "Ops sequence for the #55
+   rollout" below for the authoritative same-day order.
 
 ### Ops sequence for the #55 rollout (ordered)
 
@@ -192,9 +194,7 @@ slowly) breaks the deploy or loses data. Run them in exactly this order, same da
 
 1. Migration **PHASE 1** (above) against production — adds the nullable column.
 2. Deploy the new code — `git pull` + `uv sync --frozen --no-dev` per §13. Must happen after
-   PHASE 1: `load_events`' INSERT references `is_primary_attribution` unconditionally, so deployed
-   code running against a table still missing the column fails every load with `Unknown column
-   'is_primary_attribution'`.
+   PHASE 1 (see step 1 above / the migration section for why).
 3. `create-view` (above, §6's preflight block) — safe to run now even though the table's
    `is_primary_attribution` values are still `NULL`; it only installs the view definition
    (`CREATE OR REPLACE VIEW`), so it's fine to run again after step 4 repopulates real flags.
