@@ -87,6 +87,48 @@ def test_transform_maps_columns_and_adds_attribution_app_id() -> None:
     assert "Region" not in row
 
 
+def test_transform_preserves_appsflyer_times_verbatim() -> None:
+    """Issue #51: time values must never be shifted, only validated.
+
+    Times flow raw CSV string -> naive datetime -> literal DATETIME write, so
+    round-tripping each parsed value through AppsFlyer's own format must
+    reproduce the raw string byte-for-byte, and the values must stay
+    timezone-naive — a tz-aware datetime is the only way a shift could creep
+    into the PyMySQL serialization. Live-verified against production
+    2026-07-10: every raw Event Time string in a full window matched the
+    stored value exactly.
+    """
+    raw_times = {
+        "Attributed Touch Time": "2026-07-09 21:41:54",
+        "Install Time": "2026-07-09 00:56:09",
+        "Event Time": "2026-07-09 23:14:40",
+    }
+    edge_times = {
+        "Attributed Touch Time": "2026-07-08 23:59:59",
+        "Install Time": "2026-07-09 00:00:00",
+        "Event Time": "2026-07-09 00:00:00",
+    }
+    df = _df([_raw_row(**raw_times), _raw_row(**edge_times)])
+    rows = transform_events(
+        df,
+        attribution_type="non_organic",
+        app_id="id1458505230",
+        media_source_filter="Facebook Ads",
+        event_names_filter=["af_purchase", "af_purchase_YC"],
+    )
+    assert len(rows) == 2
+    for expected, row in zip((raw_times, edge_times), rows, strict=True):
+        for raw_col, target_col in (
+            ("Attributed Touch Time", "attributed_touch_time"),
+            ("Install Time", "install_time"),
+            ("Event Time", "event_time"),
+        ):
+            value = row[target_col]
+            assert isinstance(value, datetime.datetime)
+            assert value.tzinfo is None
+            assert value.strftime("%Y-%m-%d %H:%M:%S") == expected[raw_col]
+
+
 def test_transform_filters_out_non_matching_media_source() -> None:
     df = _df([_raw_row(**{"Media Source": "Google Ads"})])
     rows = transform_events(
