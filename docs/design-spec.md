@@ -100,9 +100,7 @@
   behavior is itself evidence toward resolving that open question.
 - **Config (env / `.env`):** see `.env.example` — `DB_HOST/PORT/USER/PASSWORD/NAME/TABLE`,
   `APPSFLYER_API_TOKEN`, `APPSFLYER_APP_IDS`, `APPSFLYER_MEDIA_SOURCE`, `APPSFLYER_EVENT_NAMES`,
-  `APPSFLYER_DAILY_LOOKBACK_DAYS` (default 1), `APPSFLYER_TIMEZONE` (issue #53; unset = UTC,
-  production sets `Europe/Riga` so report times and day boundaries match the analytics team's
-  references). The two CSV list fields reject empty values at
+  `APPSFLYER_DAILY_LOOKBACK_DAYS` (default 1). The two CSV list fields reject empty values at
   startup (issue #9) — a truncated EnvironmentFile line fails loudly instead of producing a
   silent no-op run (empty app list) or an active window wipe (empty event list).
 - **Table schema:** `sql/create_table.sql` (Stage 2), per Mark's DDL in BAF-2 comment 62293.

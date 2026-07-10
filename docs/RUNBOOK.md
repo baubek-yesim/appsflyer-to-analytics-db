@@ -110,13 +110,6 @@ window ending yesterday, re-capturing AppsFlyer late/offline-cached events at no
 report-download quota (default when unset: 1 = yesterday only; see
 `deploy/appsflyer.env.example` for the full rationale).
 
-`APPSFLYER_TIMEZONE=Europe/Riga` (issue #53) makes AppsFlyer express report times — and
-interpret the from/to day boundaries — in that zone instead of UTC. Required in this
-deployment: the analytics team's reference exports are Europe/Riga, and UTC pulls land
-3 hours behind them. The value must match the app-level timezone setting in AppsFlyer
-exactly; a malformed zone name fails startup, but a valid-but-wrong one silently falls
-back to UTC server-side.
-
 ## 6. Preflight — through systemd, not a shell `source`
 
 Sourcing the env file in bash would choke on the unquoted space in `Facebook Ads` (bash would try to

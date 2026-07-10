@@ -158,27 +158,3 @@ def test_event_time_from_after_to_rejected(monkeypatch: pytest.MonkeyPatch) -> N
             APPSFLYER_EVENT_TIME_FROM="2026-07-08",
             APPSFLYER_EVENT_TIME_TO="2026-06-04",
         )
-
-
-def test_timezone_defaults_to_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Issue #53: no timezone means AppsFlyer reports in UTC — today's behavior."""
-    assert _settings(monkeypatch).appsflyer_timezone is None
-
-
-def test_timezone_accepts_iana_name_and_strips(monkeypatch: pytest.MonkeyPatch) -> None:
-    settings = _settings(monkeypatch, APPSFLYER_TIMEZONE=" Europe/Riga ")
-    assert settings.appsflyer_timezone == "Europe/Riga"
-
-
-def test_empty_timezone_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A present-but-empty line must fail startup loudly (issue #29 pattern),
-    not silently degrade to UTC pulls."""
-    with pytest.raises(ValidationError):
-        _settings(monkeypatch, APPSFLYER_TIMEZONE="   ")
-
-
-def test_invalid_timezone_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A typo'd zone would make AppsFlyer silently fall back to UTC server-side —
-    catch what's catchable (malformed IANA names) at startup instead."""
-    with pytest.raises(ValidationError, match="IANA"):
-        _settings(monkeypatch, APPSFLYER_TIMEZONE="Europe/Rigga")

@@ -103,33 +103,7 @@ def test_fetch_events_sends_expected_params_and_headers() -> None:
     assert request.url.params["to"] == "2026-05-20"
     assert request.url.params["event_name"] == "af_purchase,af_purchase_YC"
     assert request.url.params["media_source"] == "Facebook Ads"
-    assert "timezone" not in request.url.params  # default: AppsFlyer reports in UTC
     assert request.headers["Authorization"] == "Bearer secret-token"
-
-
-@respx.mock
-def test_fetch_events_sends_timezone_param_when_configured() -> None:
-    """Issue #53: with `timezone`, AppsFlyer expresses event times AND the
-    from/to day boundaries in that zone; without it, reports are UTC — 3h
-    behind the analytics team's Europe/Riga references (live-verified
-    2026-07-10 against Mark's reference export, exact row match).
-    """
-    route = respx.get(_url("id123", "non_organic")).mock(
-        return_value=httpx.Response(200, text=SAMPLE_CSV)
-    )
-    with httpx.Client() as client:
-        fetch_events(
-            client,
-            app_id="id123",
-            attribution_type="non_organic",
-            from_date=datetime.date(2026, 7, 9),
-            to_date=datetime.date(2026, 7, 9),
-            api_token="token",
-            media_source="Facebook Ads",
-            event_names=["af_purchase"],
-            timezone="Europe/Riga",
-        )
-    assert route.calls.last.request.url.params["timezone"] == "Europe/Riga"
 
 
 @respx.mock

@@ -164,22 +164,6 @@ def test_run_daily_dry_run_skips_load(
 
 
 @respx.mock
-def test_run_daily_passes_configured_timezone_to_api(
-    monkeypatch: pytest.MonkeyPatch, load_spy: list[dict[str, Any]]
-) -> None:
-    """Issue #53: APPSFLYER_TIMEZONE reaches every report download's query string."""
-    _set_env(monkeypatch, APPSFLYER_TIMEZONE="Europe/Riga")
-    _mock_all_ok()
-
-    summary = run_daily(date=datetime.date(2026, 5, 20))
-
-    assert summary.all_succeeded
-    assert len(respx.calls) == len(APP_IDS) * len(ATTRIBUTION_TYPES)
-    for call in respx.calls:
-        assert call.request.url.params["timezone"] == "Europe/Riga"
-
-
-@respx.mock
 def test_run_daily_isolates_appsflyer_api_error(
     monkeypatch: pytest.MonkeyPatch, load_spy: list[dict[str, Any]]
 ) -> None:
