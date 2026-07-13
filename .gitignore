@@ -40,5 +40,10 @@ htmlcov/
 # Local git worktrees used for isolated feature-branch work.
 /.worktrees/
 
+# One-off local CSV drops for manual/occasional loads into the analytics DB
+# (e.g. references/appsflayer_add_raw.csv) — local-only, production-shaped data,
+# never committed (this repo is public).
+/references/
+
 # subagent-driven-development scratch progress ledger (per-worktree, not shared history)
 /.superpowers/
