@@ -60,8 +60,12 @@ UAs, this is the first thing to try, and this paragraph is the breadcrumb.
   are dropped. The scripts load them (verified 2026-07-08 during the #7 work). This is the
   largest systematic data delta vs. the scripts and is the subject of the open policy decision
   with the schema owner (issue #46 / BAF-2 thread).
-- **Exact-duplicate collapse + conflict guard** (issue #23) — implements the dedup key Mark
-  himself specified after writing the scripts (BAF-2 comment 62585).
+- **Exact-duplicate collapse** (issue #23) — implements the dedup key Mark himself specified after
+  writing the scripts (BAF-2 comment 62585). Rows sharing the key but differing elsewhere are kept
+  (both of them) with a WARNING, since AppsFlyer's second-granular timestamps cannot separate two
+  purchases made by one user inside the same second — measured live 2026-08-13, one such pair in a
+  242-row window. The original guard raised instead, which cost that whole window; Mark's comment
+  specifies the key, not the failure mode.
 - **Defensive client-side re-filter** on `Media Source`/`Event Name`. The scripts trust the API
   params. Corner: a drifted value (casing/whitespace/privacy-masked) would be silently dropped by
   the pipeline where the scripts would keep it — accepted; revisit with #46's outcome.

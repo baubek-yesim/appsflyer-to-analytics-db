@@ -402,24 +402,93 @@ def test_transform_collapses_exact_duplicate_rows(
     )
 
 
-def test_transform_raises_on_conflicting_duplicate_rows() -> None:
+def test_transform_keeps_conflicting_duplicate_rows_with_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Same key (event_time, event_name, appsflyer_id) but different
-    event_revenue is not a safe-to-collapse duplicate — the dedup key's
-    uniqueness assumption doesn't hold for this data, so it must fail loudly
-    rather than silently pick one value (Mark's key explicitly excludes
-    event_revenue, BAF-2 comment 62585).
+    event_revenue means two genuinely distinct purchases in the same second —
+    both are loaded, with a WARNING for visibility.
+
+    Measured in production 2026-08-13: filling 2026-07-15..07-26 lost the whole
+    com.yesimmobile/non_organic window to exactly one such pair (3 vs 4 EUR at
+    2026-07-19 04:26:43) out of 242 rows. Mark's key (BAF-2 comment 62585)
+    defines what counts as a duplicate; raising on a conflict was this repo's
+    own guard (issue #23), and trading 242 rows for one ambiguous pair is the
+    wrong side of that trade. Exact duplicates still collapse — see
+    test_transform_collapses_exact_duplicate_rows.
     """
     df = _df(
         [
-            _raw_row(**{"Event Revenue": "9.99"}),
-            _raw_row(**{"Event Revenue": "19.99"}),
+            _raw_row(**{"Event Revenue": "3"}),
+            _raw_row(**{"Event Revenue": "4"}),
         ]
     )
-    with pytest.raises(TransformError, match="Conflicting duplicate"):
-        transform_events(
+    with caplog.at_level(logging.WARNING, logger="appsflyer_pipeline.transform"):
+        rows = transform_events(
             df,
             attribution_type="non_organic",
             app_id="id1458505230",
             media_source_filter="Facebook Ads",
             event_names_filter=["af_purchase", "af_purchase_YC"],
         )
+
+    assert [row["event_revenue"] for row in rows] == [Decimal("3"), Decimal("4")]
+    assert any("conflicting" in r.message and "id1458505230" in r.message for r in caplog.records)
+
+
+def test_transform_counts_every_conflict_but_names_only_the_first(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Two conflicting pairs are both kept and both counted; the WARNING names
+    the first key so a large window doesn't produce an unreadable log line.
+    """
+    df = _df(
+        [
+            _raw_row(**{"Event Revenue": "3"}),
+            _raw_row(**{"Event Revenue": "4"}),
+            _raw_row(**{"AppsFlyer ID": "other-id", "Event Revenue": "5"}),
+            _raw_row(**{"AppsFlyer ID": "other-id", "Event Revenue": "6"}),
+        ]
+    )
+    with caplog.at_level(logging.WARNING, logger="appsflyer_pipeline.transform"):
+        rows = transform_events(
+            df,
+            attribution_type="non_organic",
+            app_id="id1458505230",
+            media_source_filter="Facebook Ads",
+            event_names_filter=["af_purchase", "af_purchase_YC"],
+        )
+
+    assert len(rows) == 4
+    messages = " ".join(r.message for r in caplog.records)
+    assert "kept 2 conflicting" in messages
+    assert "af-id-1" in messages and "other-id" not in messages
+
+
+def test_transform_reports_conflicts_and_exact_duplicates_separately(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A window carrying both kinds of duplicate keeps the two counts apart:
+    the exact pair collapses to one row, the conflicting pair keeps both.
+    """
+    df = _df(
+        [
+            _raw_row(),
+            _raw_row(),
+            _raw_row(**{"AppsFlyer ID": "other-id", "Event Revenue": "3"}),
+            _raw_row(**{"AppsFlyer ID": "other-id", "Event Revenue": "4"}),
+        ]
+    )
+    with caplog.at_level(logging.WARNING, logger="appsflyer_pipeline.transform"):
+        rows = transform_events(
+            df,
+            attribution_type="non_organic",
+            app_id="id1458505230",
+            media_source_filter="Facebook Ads",
+            event_names_filter=["af_purchase", "af_purchase_YC"],
+        )
+
+    assert len(rows) == 3
+    messages = " ".join(r.message for r in caplog.records)
+    assert "collapsed 1 exact-duplicate" in messages
+    assert "1 conflicting" in messages
