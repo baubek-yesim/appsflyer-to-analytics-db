@@ -74,28 +74,41 @@ def _dedupe_rows(
 
     `attribution_type`/`app_id` are constant across one transform_events call, so
     this 3-column key is covariant with Mark's full 4-column dedup key (BAF-2
-    comment 62585) — neither column can differ within a single call. Rows
-    sharing the key but disagreeing on any other field raise: that means the
-    key's uniqueness assumption doesn't hold for this data and needs a human,
-    not a silent pick. A raised error fails only the current
-    (app_id, attribution_type, chunk) window via _process_window's isolation —
-    not the whole run — but that window's load is skipped entirely until the
-    conflict is resolved, same as any other TransformError.
+    comment 62585) — neither column can differ within a single call.
+
+    Rows sharing the key but disagreeing on another field are **kept, both of
+    them**, with a WARNING. They are two genuinely distinct events that the key
+    cannot separate: AppsFlyer timestamps are second-granular, so one user
+    making two purchases of different amounts inside the same second produces
+    exactly this shape. Measured live on 2026-08-13 while filling
+    2026-07-15..07-26 — one such pair (3 vs 4 EUR at 2026-07-19 04:26:43) out
+    of 242 rows, and under the previous behavior (raise) it cost the entire
+    window: `_process_window` isolates a TransformError to its own
+    (app_id, attribution_type, chunk), but that window then loads nothing at
+    all. Dropping 242 rows to avoid guessing about 2 is the wrong trade, and
+    Mark's comment specifies the dedup key, not the failure mode — the raise
+    was this repo's own guard (issue #23).
+
+    Exact duplicates still collapse: identical bytes carry no information that
+    picking one of them could lose.
     """
-    seen: dict[tuple[Any, Any, Any], dict[str, Any]] = {}
+    seen: dict[tuple[Any, Any, Any], list[dict[str, Any]]] = {}
+    kept: list[dict[str, Any]] = []
     duplicate_count = 0
+    conflict_count = 0
+    first_conflict: tuple[Any, Any, Any] | None = None
     for row in rows:
         key = (row["event_time"], row["event_name"], row["appsflyer_id"])
-        existing = seen.get(key)
-        if existing is None:
-            seen[key] = row
-        elif existing == row:
+        bucket = seen.setdefault(key, [])
+        if any(existing == row for existing in bucket):
             duplicate_count += 1
-        else:
-            raise TransformError(
-                f"Conflicting duplicate rows for key {key!r} "
-                f"(attribution_type={attribution_type}, app_id={app_id}): {existing} vs {row}"
-            )
+            continue
+        if bucket:
+            conflict_count += 1
+            if first_conflict is None:
+                first_conflict = key
+        bucket.append(row)
+        kept.append(row)
     if duplicate_count:
         logger.warning(
             "collapsed %d exact-duplicate row(s): attribution_type=%s app_id=%s",
@@ -103,7 +116,16 @@ def _dedupe_rows(
             attribution_type,
             app_id,
         )
-    return list(seen.values())
+    if conflict_count:
+        logger.warning(
+            "kept %d conflicting row(s) sharing a dedup key (distinct events the key "
+            "cannot separate; first: %r): attribution_type=%s app_id=%s",
+            conflict_count,
+            first_conflict,
+            attribution_type,
+            app_id,
+        )
+    return kept
 
 
 def transform_events(
