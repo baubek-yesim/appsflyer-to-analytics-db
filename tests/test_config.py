@@ -19,7 +19,23 @@ BASE_ENV = {
 }
 
 
+# Optional keys with no default: an ambient value (a developer's shell, a CI
+# `env:` block) would otherwise silently satisfy fields these tests assert are
+# unset. Cleared unless the test names them explicitly.
+_OPTIONAL_ENV_KEYS = (
+    "APPSFLYER_MEDIA_SOURCE",
+    "APPSFLYER_EVENT_NAMES",
+    "APPSFLYER_TIMEZONE",
+    "APPSFLYER_DAILY_LOOKBACK_DAYS",
+    "APPSFLYER_EVENT_TIME_FROM",
+    "APPSFLYER_EVENT_TIME_TO",
+)
+
+
 def _settings(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> Settings:
+    for key in _OPTIONAL_ENV_KEYS:
+        if key not in overrides:
+            monkeypatch.delenv(key, raising=False)
     for key, value in {**BASE_ENV, **overrides}.items():
         monkeypatch.setenv(key, value)
     return Settings(_env_file=None)  # type: ignore[call-arg]
@@ -37,10 +53,36 @@ def test_splits_csv_app_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.appsflyer_app_ids == ["id1458505230", "com.yesimmobile"]
 
 
-def test_default_media_source_and_event_names(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_filters_are_unset_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BAF-11 stage 1: both filters became three-valued (unset / named / blank).
+    Unset means NO filter — the full raw export — so every environment that
+    wants BAF-2's scope (Meta purchases only) has to name it explicitly.
+    `.env.example`, both deploy templates and CI's pytest step all do.
+    """
     settings = _settings(monkeypatch)
+    assert settings.appsflyer_media_source is None
+    assert settings.appsflyer_event_names is None
+
+
+def test_explicit_filters_are_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _settings(
+        monkeypatch,
+        APPSFLYER_MEDIA_SOURCE="Facebook Ads",
+        APPSFLYER_EVENT_NAMES="af_purchase, af_purchase_YC",
+    )
     assert settings.appsflyer_media_source == "Facebook Ads"
     assert settings.appsflyer_event_names == ["af_purchase", "af_purchase_YC"]
+
+
+@pytest.mark.parametrize("raw", ["", "   "])
+def test_blank_media_source_rejected(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+    """Optional is not the same as blank. A present-but-empty line is still the
+    truncated-EnvironmentFile scenario (issue #9) and must abort startup — the
+    one thing it must NOT do is read as "no filter" and silently widen the pull
+    to every media source.
+    """
+    with pytest.raises(ValidationError):
+        _settings(monkeypatch, APPSFLYER_MEDIA_SOURCE=raw)
 
 
 def test_missing_required_field_raises(monkeypatch: pytest.MonkeyPatch) -> None:
