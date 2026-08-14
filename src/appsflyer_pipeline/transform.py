@@ -67,48 +67,91 @@ def _parse_revenue(value: str | None) -> Decimal | None:
         raise TransformError(f"Unexpected event_revenue value: {value!r}") from exc
 
 
+def _install_time_rank(row: dict[str, Any]) -> tuple[int, datetime.datetime]:
+    """Sort key making a NULL `install_time` lose to any real one.
+
+    Mirrors MariaDB's `ORDER BY install_time DESC`, which sorts NULLs last. The
+    leading flag keeps None out of the datetime comparison rather than mapping it
+    onto `datetime.min`, which a (pathological) real timestamp could collide with.
+    """
+    install_time = row["install_time"]
+    if install_time is None:
+        return (0, datetime.datetime.min)
+    return (1, install_time)
+
+
 def _dedupe_rows(
     rows: list[dict[str, Any]], *, attribution_type: AttributionType, app_id: str
 ) -> list[dict[str, Any]]:
-    """Collapse exact duplicate rows sharing (event_time, event_name, appsflyer_id).
+    """Keep exactly ONE row per (event_time, event_name, appsflyer_id) key: the
+    one with the latest `install_time`.
 
     `attribution_type`/`app_id` are constant across one transform_events call, so
     this 3-column key is covariant with Mark's full 4-column dedup key (BAF-2
-    comment 62585) — neither column can differ within a single call.
+    comment 62585) — neither column can differ within a single call. Note the
+    consequence: this function can only ever compare rows *within* one
+    (app_id, attribution_type) report, so it does NOT collapse the
+    dual-attribution twins (issues #7/#46/#47), which arrive in two separate
+    reports and two separate load windows. Only a post-load SQL pass spanning the
+    whole table can do that — see
+    sql/migrations/2026-08-14-dedupe-keep-latest-install-time.sql.
 
-    Rows sharing the key but disagreeing on another field are **kept, both of
-    them**, with a WARNING. They are two genuinely distinct events that the key
-    cannot separate: AppsFlyer timestamps are second-granular, so one user
-    making two purchases of different amounts inside the same second produces
-    exactly this shape. Measured live on 2026-08-13 while filling
-    2026-07-15..07-26 — one such pair (3 vs 4 EUR at 2026-07-19 04:26:43) out
-    of 242 rows, and under the previous behavior (raise) it cost the entire
-    window: `_process_window` isolates a TransformError to its own
-    (app_id, attribution_type, chunk), but that window then loads nothing at
-    all. Dropping 242 rows to avoid guessing about 2 is the wrong trade, and
-    Mark's comment specifies the dedup key, not the failure mode — the raise
-    was this repo's own guard (issue #23).
+    Conflict handling changed on 2026-08-14 (data-analytics decision): rows
+    sharing the key but disagreeing on another field are no longer both kept —
+    the latest `install_time` wins and the loser is DROPPED, matching the SQL
+    rewrite above so a scheduled run cannot reintroduce what that rewrite
+    removed. Both prior behaviours are recorded in docs/design-spec.md: raising
+    (until 2026-08-13) cost the entire window, keeping both (2026-08-13..08-14)
+    kept every row.
 
-    Exact duplicates still collapse: identical bytes carry no information that
-    picking one of them could lose.
+    The known cost, logged loudly: the one conflict actually measured in
+    production (2026-08-13, 3 vs 4 EUR at 2026-07-19 04:26:43 in a 242-row
+    window) is two distinct purchases by one user in the same second. They share
+    an appsflyer_id, hence an install_time, so the tiebreak is report order, not
+    data — one real purchase is discarded. The WARNING reports how many such ties
+    occurred and how much `event_revenue` went with them.
+
+    Exact duplicates still collapse separately: identical bytes carry no
+    information that picking one of them could lose.
     """
-    seen: dict[tuple[Any, Any, Any], list[dict[str, Any]]] = {}
+    slot_of_key: dict[tuple[Any, Any, Any], int] = {}
     kept: list[dict[str, Any]] = []
     duplicate_count = 0
     conflict_count = 0
+    tie_count = 0
+    discarded_revenue = Decimal(0)
     first_conflict: tuple[Any, Any, Any] | None = None
+
     for row in rows:
         key = (row["event_time"], row["event_name"], row["appsflyer_id"])
-        bucket = seen.setdefault(key, [])
-        if any(existing == row for existing in bucket):
+        slot = slot_of_key.get(key)
+        if slot is None:
+            slot_of_key[key] = len(kept)
+            kept.append(row)
+            continue
+
+        incumbent = kept[slot]
+        if row == incumbent:
             duplicate_count += 1
             continue
-        if bucket:
-            conflict_count += 1
-            if first_conflict is None:
-                first_conflict = key
-        bucket.append(row)
-        kept.append(row)
+
+        conflict_count += 1
+        if first_conflict is None:
+            first_conflict = key
+        challenger_rank = _install_time_rank(row)
+        incumbent_rank = _install_time_rank(incumbent)
+        if challenger_rank == incumbent_rank:
+            # No data to choose on. Last row in report order wins, matching the
+            # SQL rewrite's `id DESC` tiebreak (ids follow insertion = report
+            # order), which at least makes repeated runs agree with each other.
+            tie_count += 1
+        if challenger_rank >= incumbent_rank:
+            kept[slot] = row
+            discarded = incumbent
+        else:
+            discarded = row
+        discarded_revenue += discarded["event_revenue"] or Decimal(0)
+
     if duplicate_count:
         logger.warning(
             "collapsed %d exact-duplicate row(s): attribution_type=%s app_id=%s",
@@ -118,10 +161,20 @@ def _dedupe_rows(
         )
     if conflict_count:
         logger.warning(
-            "kept %d conflicting row(s) sharing a dedup key (distinct events the key "
-            "cannot separate; first: %r): attribution_type=%s app_id=%s",
+            "dropped %d conflicting row(s) sharing a dedup key (kept the latest "
+            "install_time; first: %r; discarded event_revenue: %s): "
+            "attribution_type=%s app_id=%s",
             conflict_count,
             first_conflict,
+            discarded_revenue,
+            attribution_type,
+            app_id,
+        )
+    if tie_count:
+        logger.warning(
+            "%d of those conflict(s) had identical install_time — the surviving row "
+            "was picked by report order, not by data: attribution_type=%s app_id=%s",
+            tie_count,
             attribution_type,
             app_id,
         )
@@ -148,7 +201,9 @@ def transform_events(
     `_dedupe_rows`, and since `attribution_type` is part of that key, a
     dual-attributed purchase legitimately appears once per report —
     attribution_type is a dimension, and cross-attribution sums count such
-    purchases in both dimensions by design.
+    purchases in both dimensions by design. Within one report, a key collision
+    now resolves to a single row (latest `install_time`) rather than keeping
+    both — see `_dedupe_rows`.
     """
     missing = [raw for raw in _COLUMN_MAP if raw not in df.columns]
     if missing:
