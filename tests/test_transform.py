@@ -402,20 +402,92 @@ def test_transform_collapses_exact_duplicate_rows(
     )
 
 
-def test_transform_keeps_conflicting_duplicate_rows_with_warning(
+def test_transform_keeps_only_the_latest_install_time_on_conflict(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Same key (event_time, event_name, appsflyer_id) but different
-    event_revenue means two genuinely distinct purchases in the same second —
-    both are loaded, with a WARNING for visibility.
+    event_revenue: only the row with the latest install_time survives
+    (data-analytics decision 2026-08-14), and the WARNING reports the revenue
+    that went with the discarded row.
 
-    Measured in production 2026-08-13: filling 2026-07-15..07-26 lost the whole
-    com.yesimmobile/non_organic window to exactly one such pair (3 vs 4 EUR at
-    2026-07-19 04:26:43) out of 242 rows. Mark's key (BAF-2 comment 62585)
-    defines what counts as a duplicate; raising on a conflict was this repo's
-    own guard (issue #23), and trading 242 rows for one ambiguous pair is the
-    wrong side of that trade. Exact duplicates still collapse — see
-    test_transform_collapses_exact_duplicate_rows.
+    Ordering is by install_time, not by position — here the LATER install_time
+    arrives first in the report, so the surviving row is the first one.
+    """
+    df = _df(
+        [
+            _raw_row(**{"Event Revenue": "3", "Install Time": "2026-05-19 09:30:00"}),
+            _raw_row(**{"Event Revenue": "4", "Install Time": "2026-05-18 08:00:00"}),
+        ]
+    )
+    with caplog.at_level(logging.WARNING, logger="appsflyer_pipeline.transform"):
+        rows = transform_events(
+            df,
+            attribution_type="non_organic",
+            app_id="id1458505230",
+            media_source_filter="Facebook Ads",
+            event_names_filter=["af_purchase", "af_purchase_YC"],
+        )
+
+    assert [row["event_revenue"] for row in rows] == [Decimal("3")]
+    messages = " ".join(r.message for r in caplog.records)
+    assert "dropped 1 conflicting" in messages and "id1458505230" in messages
+    assert "discarded event_revenue: 4" in messages
+
+
+def test_transform_later_install_time_wins_from_either_report_position(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The mirror image of the test above: the later install_time arrives
+    second and still wins, so the outcome doesn't depend on report order.
+    """
+    df = _df(
+        [
+            _raw_row(**{"Event Revenue": "3", "Install Time": "2026-05-18 08:00:00"}),
+            _raw_row(**{"Event Revenue": "4", "Install Time": "2026-05-19 09:30:00"}),
+        ]
+    )
+    with caplog.at_level(logging.WARNING, logger="appsflyer_pipeline.transform"):
+        rows = transform_events(
+            df,
+            attribution_type="non_organic",
+            app_id="id1458505230",
+            media_source_filter="Facebook Ads",
+            event_names_filter=["af_purchase", "af_purchase_YC"],
+        )
+
+    assert [row["event_revenue"] for row in rows] == [Decimal("4")]
+    assert "discarded event_revenue: 3" in " ".join(r.message for r in caplog.records)
+
+
+def test_transform_null_install_time_loses_to_a_real_one() -> None:
+    """A NULL install_time ranks below any real timestamp, mirroring MariaDB's
+    `ORDER BY install_time DESC` (NULLs last) in the SQL rewrite.
+    """
+    df = _df(
+        [
+            _raw_row(**{"Event Revenue": "3", "Install Time": ""}),
+            _raw_row(**{"Event Revenue": "4", "Install Time": "2026-05-18 08:00:00"}),
+        ]
+    )
+    rows = transform_events(
+        df,
+        attribution_type="non_organic",
+        app_id="id1458505230",
+        media_source_filter="Facebook Ads",
+        event_names_filter=["af_purchase", "af_purchase_YC"],
+    )
+
+    assert [row["event_revenue"] for row in rows] == [Decimal("4")]
+
+
+def test_transform_warns_when_install_time_cannot_break_the_tie(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The case measured in production (3 vs 4 EUR at 2026-07-19 04:26:43): two
+    distinct purchases by one user in the same second share an appsflyer_id and
+    therefore an install_time. Nothing in the data can choose between them, so
+    the last row in report order wins (matching the SQL rewrite's `id DESC`) and
+    the tie is called out separately — this is a real purchase being discarded.
     """
     df = _df(
         [
@@ -432,15 +504,18 @@ def test_transform_keeps_conflicting_duplicate_rows_with_warning(
             event_names_filter=["af_purchase", "af_purchase_YC"],
         )
 
-    assert [row["event_revenue"] for row in rows] == [Decimal("3"), Decimal("4")]
-    assert any("conflicting" in r.message and "id1458505230" in r.message for r in caplog.records)
+    assert [row["event_revenue"] for row in rows] == [Decimal("4")]
+    messages = " ".join(r.message for r in caplog.records)
+    assert "1 of those conflict(s) had identical install_time" in messages
+    assert "picked by report order, not by data" in messages
 
 
 def test_transform_counts_every_conflict_but_names_only_the_first(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Two conflicting pairs are both kept and both counted; the WARNING names
-    the first key so a large window doesn't produce an unreadable log line.
+    """Two conflicting pairs are both resolved and both counted; the WARNING
+    names the first key so a large window doesn't produce an unreadable log
+    line, and the discarded revenue is summed across both.
     """
     df = _df(
         [
@@ -459,9 +534,10 @@ def test_transform_counts_every_conflict_but_names_only_the_first(
             event_names_filter=["af_purchase", "af_purchase_YC"],
         )
 
-    assert len(rows) == 4
+    assert len(rows) == 2
     messages = " ".join(r.message for r in caplog.records)
-    assert "kept 2 conflicting" in messages
+    assert "dropped 2 conflicting" in messages
+    assert "discarded event_revenue: 8" in messages  # 3 + 5, the two losers
     assert "af-id-1" in messages and "other-id" not in messages
 
 
@@ -469,7 +545,7 @@ def test_transform_reports_conflicts_and_exact_duplicates_separately(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A window carrying both kinds of duplicate keeps the two counts apart:
-    the exact pair collapses to one row, the conflicting pair keeps both.
+    the exact pair collapses to one row, the conflicting pair resolves to one.
     """
     df = _df(
         [
@@ -488,7 +564,32 @@ def test_transform_reports_conflicts_and_exact_duplicates_separately(
             event_names_filter=["af_purchase", "af_purchase_YC"],
         )
 
-    assert len(rows) == 3
+    assert len(rows) == 2
     messages = " ".join(r.message for r in caplog.records)
     assert "collapsed 1 exact-duplicate" in messages
-    assert "1 conflicting" in messages
+    assert "dropped 1 conflicting" in messages
+
+
+def test_transform_conflict_with_null_revenue_does_not_break_the_sum(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`event_revenue` is nullable, so the discarded-revenue tally has to treat
+    a NULL loser as zero rather than raising on Decimal + None.
+    """
+    df = _df(
+        [
+            _raw_row(**{"Event Revenue": "", "Install Time": "2026-05-18 08:00:00"}),
+            _raw_row(**{"Event Revenue": "4", "Install Time": "2026-05-19 09:30:00"}),
+        ]
+    )
+    with caplog.at_level(logging.WARNING, logger="appsflyer_pipeline.transform"):
+        rows = transform_events(
+            df,
+            attribution_type="non_organic",
+            app_id="id1458505230",
+            media_source_filter="Facebook Ads",
+            event_names_filter=["af_purchase", "af_purchase_YC"],
+        )
+
+    assert [row["event_revenue"] for row in rows] == [Decimal("4")]
+    assert "discarded event_revenue: 0" in " ".join(r.message for r in caplog.records)
