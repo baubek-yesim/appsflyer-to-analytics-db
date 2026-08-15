@@ -60,8 +60,8 @@ def _fetch_csv(
     from_date: datetime.date,
     to_date: datetime.date,
     api_token: str,
-    media_source: str,
-    event_names: list[str],
+    media_source: str | None,
+    event_names: list[str] | None,
     timezone: str | None = None,
 ) -> bytes:
     endpoint = _ENDPOINT_BY_ATTRIBUTION[attribution_type]
@@ -69,9 +69,16 @@ def _fetch_csv(
     params = {
         "from": from_date.isoformat(),
         "to": to_date.isoformat(),
-        "event_name": ",".join(event_names),
-        "media_source": media_source,
     }
+    # BAF-11 stage 1: None means "no server-side filter", which has to be an
+    # ABSENT param. Sending `media_source=` (empty) instead would be a filter
+    # matching nothing, and AppsFlyer answers that with a valid header-only
+    # report — indistinguishable downstream from a genuinely quiet window, so
+    # the idempotent delete-then-insert would wipe it (issue #45's shape).
+    if event_names is not None:
+        params["event_name"] = ",".join(event_names)
+    if media_source is not None:
+        params["media_source"] = media_source
     if timezone is not None:
         # Issue #53: without this param AppsFlyer reports in UTC; with it, event
         # times and the from/to day boundaries follow the app's configured zone.
@@ -98,11 +105,15 @@ def fetch_events(
     from_date: datetime.date,
     to_date: datetime.date,
     api_token: str,
-    media_source: str,
-    event_names: list[str],
+    media_source: str | None,
+    event_names: list[str] | None,
     timezone: str | None = None,
 ) -> pl.DataFrame:
     """Fetch one app/attribution-type/date-range chunk as a raw DataFrame.
+
+    `media_source`/`event_names` are optional filters (BAF-11 stage 1): None
+    omits the param entirely, so AppsFlyer returns every media source / every
+    event name for the window.
 
     Returns an empty DataFrame when AppsFlyer has no matching events for the
     window — delivered as a headers-only CSV, a legitimately common case. A

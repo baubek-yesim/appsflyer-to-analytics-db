@@ -186,14 +186,17 @@ def transform_events(
     *,
     attribution_type: AttributionType,
     app_id: str,
-    media_source_filter: str,
-    event_names_filter: list[str],
+    media_source_filter: str | None,
+    event_names_filter: list[str] | None,
 ) -> list[dict[str, Any]]:
     """Map one raw AppsFlyer chunk to typed rows matching the target schema.
 
     Re-applies the media-source/event-name filters client-side (defense in
     depth on top of the API's own `media_source`/`event_name` request params)
     and adds `attribution_type`/`app_id`, which AppsFlyer's export doesn't know.
+
+    Either filter may be None (BAF-11 stage 1), meaning it was not requested
+    from the API either — so there is nothing to re-apply and every row is kept.
 
     ALL rows are loaded regardless of `Is Primary Attribution` (issue #47,
     data-analytics decision on #46, reversing #7's filter): dedup follows
@@ -220,10 +223,19 @@ def transform_events(
     if df.is_empty():
         return []
 
-    filtered = df.filter(
-        pl.col("Media Source").eq(media_source_filter)
-        & pl.col("Event Name").is_in(event_names_filter)
-    )
+    # BAF-11 stage 1: an unset filter drops its predicate entirely rather than
+    # comparing against None. This is not cosmetic — organic rows carry an EMPTY
+    # Media Source, so any predicate built from a missing filter would discard
+    # exactly the rows the full raw export exists to capture.
+    predicates: list[pl.Expr] = []
+    if media_source_filter is not None:
+        predicates.append(pl.col("Media Source").eq(media_source_filter))
+    if event_names_filter is not None:
+        predicates.append(pl.col("Event Name").is_in(event_names_filter))
+
+    filtered = df
+    for predicate in predicates:
+        filtered = filtered.filter(predicate)
 
     rows: list[dict[str, Any]] = []
     for raw_row in filtered.select(list(_COLUMN_MAP)).iter_rows(named=True):

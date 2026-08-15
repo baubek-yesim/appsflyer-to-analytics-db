@@ -105,6 +105,14 @@
   references). The two CSV list fields reject empty values at
   startup (issue #9) — a truncated EnvironmentFile line fails loudly instead of producing a
   silent no-op run (empty app list) or an active window wipe (empty event list).
+  `APPSFLYER_MEDIA_SOURCE`/`APPSFLYER_EVENT_NAMES` are **three-valued** since BAF-11 stage 1: a
+  named value filters (BAF-2's scope, what production sets), a blank value is still a startup
+  error, and an *absent* key means no filter at all — neither param is sent and `transform` keeps
+  every row. Removing the key does not fall back to a default; it widens the pull by orders of
+  magnitude (measured volumes in
+  [`docs/superpowers/specs/2026-08-13-baf-11-column-sizing.md`](superpowers/specs/2026-08-13-baf-11-column-sizing.md):
+  7,707 unfiltered event rows/day against a couple of dozen Meta purchases). Every run logs its
+  effective mode; the unfiltered mode logs at WARNING while both modes still share one table.
 - **Table schema:** `sql/create_table.sql` (Stage 2), per Mark's DDL in BAF-2 comment 62293.
 
 ## Alternatives Considered

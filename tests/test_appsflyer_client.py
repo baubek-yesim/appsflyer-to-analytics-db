@@ -108,6 +108,36 @@ def test_fetch_events_sends_expected_params_and_headers() -> None:
 
 
 @respx.mock
+def test_fetch_events_omits_filter_params_when_unset() -> None:
+    """BAF-11 stage 1: None means "do not filter server-side", so the param has
+    to be ABSENT — not present-but-empty. `media_source=` with an empty value is
+    a filter that matches nothing, and AppsFlyer answers it with a perfectly
+    valid header-only report, which the loader would then treat as a genuinely
+    quiet window and use to wipe the window (issue #45's shape).
+    """
+    route = respx.get(_url("id123", "non_organic")).mock(
+        return_value=httpx.Response(200, text=SAMPLE_CSV)
+    )
+    with httpx.Client() as client:
+        fetch_events(
+            client,
+            app_id="id123",
+            attribution_type="non_organic",
+            from_date=datetime.date(2026, 5, 1),
+            to_date=datetime.date(2026, 5, 20),
+            api_token="secret-token",
+            media_source=None,
+            event_names=None,
+        )
+    params = route.calls.last.request.url.params
+    assert "media_source" not in params
+    assert "event_name" not in params
+    # The window itself is never optional — dropping these would pull everything.
+    assert params["from"] == "2026-05-01"
+    assert params["to"] == "2026-05-20"
+
+
+@respx.mock
 def test_fetch_events_sends_timezone_param_when_configured() -> None:
     """Issue #53: with `timezone`, AppsFlyer expresses event times AND the
     from/to day boundaries in that zone; without it, reports are UTC — 3h
