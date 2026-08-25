@@ -108,6 +108,29 @@ def test_fetch_events_sends_expected_params_and_headers() -> None:
 
 
 @respx.mock
+def test_fetch_events_sends_maximum_rows_by_default() -> None:
+    """BAF-11 stage 2: AppsFlyer's own default truncates a report at 200,000
+    rows with no error -- a normal 200 response, just short. An explicit
+    maximum_rows raises that ceiling; fetch_events must always send it.
+    """
+    route = respx.get(_url("id123", "non_organic")).mock(
+        return_value=httpx.Response(200, text=SAMPLE_CSV)
+    )
+    with httpx.Client() as client:
+        fetch_events(
+            client,
+            app_id="id123",
+            attribution_type="non_organic",
+            from_date=datetime.date(2026, 5, 20),
+            to_date=datetime.date(2026, 5, 20),
+            api_token="token",
+            media_source="Facebook Ads",
+            event_names=["af_purchase"],
+        )
+    assert route.calls.last.request.url.params["maximum_rows"] == "1000000"
+
+
+@respx.mock
 def test_fetch_events_omits_filter_params_when_unset() -> None:
     """BAF-11 stage 1: None means "do not filter server-side", so the param has
     to be ABSENT — not present-but-empty. `media_source=` with an empty value is
@@ -389,7 +412,7 @@ def test_fetch_events_raises_on_1m_row_cap(monkeypatch: pytest.MonkeyPatch) -> N
     """
     monkeypatch.setattr(pl, "read_csv", lambda *args, **kwargs: _StubDataFrame())
     respx.get(_url("id123", "non_organic")).mock(return_value=httpx.Response(200, text=SAMPLE_CSV))
-    with httpx.Client() as client, pytest.raises(AppsFlyerAPIError, match="1M-row cap"):
+    with httpx.Client() as client, pytest.raises(AppsFlyerAPIError, match="1000000-row cap"):
         fetch_events(
             client,
             app_id="id123",
@@ -400,3 +423,50 @@ def test_fetch_events_raises_on_1m_row_cap(monkeypatch: pytest.MonkeyPatch) -> N
             media_source="Facebook Ads",
             event_names=["af_purchase"],
         )
+
+
+TWO_ROW_CSV = (
+    "Attributed Touch Time,Install Time,Event Time,Event Name,Event Revenue,"
+    "Media Source,Campaign,AppsFlyer ID,Customer User ID\n"
+    "2026-05-20 10:00:00,2026-05-19 09:00:00,2026-05-20 10:05:00,af_purchase,9.99,"
+    "Facebook Ads,Summer Sale,af-id-1,user-1\n"
+    "2026-05-20 10:00:00,2026-05-19 09:00:00,2026-05-20 10:05:00,af_purchase,9.99,"
+    "Facebook Ads,Summer Sale,af-id-2,user-2\n"
+)
+
+
+@respx.mock
+def test_fetch_events_splits_window_when_response_hits_maximum_rows() -> None:
+    """BAF-11 stage 2: a response carrying exactly `maximum_rows` rows is
+    treated as truncated, not complete. The 20-day window is split into two
+    10-day halves; each half comes back under the cap and both are combined.
+    """
+    call_log: list[tuple[str, str]] = []
+
+    def _responder(request: httpx.Request) -> httpx.Response:
+        params = request.url.params
+        call_log.append((params["from"], params["to"]))
+        if (params["from"], params["to"]) == ("2026-05-01", "2026-05-20"):
+            return httpx.Response(200, text=TWO_ROW_CSV)  # == maximum_rows -> looks truncated
+        return httpx.Response(200, text=SAMPLE_CSV)  # each half: 1 row, under the cap
+
+    respx.get(_url("id123", "non_organic")).mock(side_effect=_responder)
+    with httpx.Client() as client:
+        df = fetch_events(
+            client,
+            app_id="id123",
+            attribution_type="non_organic",
+            from_date=datetime.date(2026, 5, 1),
+            to_date=datetime.date(2026, 5, 20),
+            api_token="token",
+            media_source="Facebook Ads",
+            event_names=["af_purchase"],
+            maximum_rows=2,
+        )
+
+    assert df.shape[0] == 2
+    assert call_log == [
+        ("2026-05-01", "2026-05-20"),
+        ("2026-05-01", "2026-05-10"),
+        ("2026-05-11", "2026-05-20"),
+    ]
