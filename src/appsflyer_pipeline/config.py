@@ -93,6 +93,14 @@ class Settings(BaseSettings):
     # keep config free of package imports).
     appsflyer_daily_lookback_days: Annotated[int, Field(ge=1, le=90)] = 1
 
+    # Quota-aware chunk size (BAF-11 stage 2): the Pull API bills by call, not by
+    # rows returned, so a wide chunk is strictly cheaper on quota than many
+    # narrow ones (measured 2026-08-13: a 31-day chunk costs the same single
+    # download as a 1-day one). The hard ceiling is AppsFlyer's own per-call
+    # limit (appsflyer_client.MAX_CHUNK_DAYS); this only lets an operator go
+    # narrower, e.g. to shrink one retry's blast radius.
+    appsflyer_chunk_days: Annotated[int, Field(ge=1, le=31)] = 31
+
     # Config-driven event-time window (issue #50, Mark's suggestion): the Pull
     # API's from/to params filter on EVENT TIME server-side — these map onto
     # them directly, like the reference script's from_date/to_date arguments.
