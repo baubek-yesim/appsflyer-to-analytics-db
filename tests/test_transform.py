@@ -234,16 +234,29 @@ def test_transform_raises_on_missing_required_raw_column() -> None:
         )
 
 
-def test_transform_raises_on_blank_required_field() -> None:
-    df = _df([_raw_row(**{"AppsFlyer ID": ""})])
-    with pytest.raises(TransformError, match="appsflyer_id"):
-        transform_events(
+def test_transform_skips_rows_missing_a_required_field(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """BAF-11 stage 2: a row missing a required field is skipped and counted
+    instead of failing the entire window. The previous raise-and-lose-the-
+    window behavior only ever suited the narrow, pre-filtered FB-purchase
+    stream; on the full unfiltered array a privacy-restricted or malformed row
+    is more likely, and one bad row must not cost 31 days of good ones.
+    """
+    df = _df([_raw_row(**{"AppsFlyer ID": ""}), _raw_row()])
+    with caplog.at_level(logging.WARNING, logger="appsflyer_pipeline.transform"):
+        rows = transform_events(
             df,
             attribution_type="non_organic",
             app_id="id1458505230",
             media_source_filter="Facebook Ads",
-            event_names_filter=["af_purchase"],
+            event_names_filter=["af_purchase", "af_purchase_YC"],
         )
+    assert len(rows) == 1
+    assert rows[0]["appsflyer_id"] == "af-id-1"
+    messages = " ".join(r.message for r in caplog.records)
+    assert "skipped 1 row" in messages
+    assert "appsflyer_id" in messages
 
 
 def test_transform_raises_on_unparseable_revenue() -> None:
@@ -475,6 +488,36 @@ def test_transform_keeps_only_the_latest_install_time_on_conflict(
     messages = " ".join(r.message for r in caplog.records)
     assert "dropped 1 conflicting" in messages and "id1458505230" in messages
     assert "discarded event_revenue: 4" in messages
+
+
+def test_transform_keeps_both_rows_when_event_value_differs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """BAF-11 stage 2: on the full unfiltered stream, two rows can share
+    (event_time, event_name, appsflyer_id) and still be genuinely distinct
+    events -- e.g. two screen_plans_cInternet impressions from one device in
+    the same second with a different Event Value (measured live 2026-08-13: 5
+    such rows in a single one-day, one-app conflict group). These must NOT
+    collapse into one survivor the way a real conflict does.
+    """
+    df = _df(
+        [
+            _raw_row(**{"Event Value": "plan_1gb"}),
+            _raw_row(**{"Event Value": "plan_5gb"}),
+        ]
+    )
+    with caplog.at_level(logging.WARNING, logger="appsflyer_pipeline.transform"):
+        rows = transform_events(
+            df,
+            attribution_type="non_organic",
+            app_id="id1458505230",
+            media_source_filter="Facebook Ads",
+            event_names_filter=["af_purchase", "af_purchase_YC"],
+        )
+    assert len(rows) == 2
+    assert not any("dropped" in r.message or "collapsed" in r.message for r in caplog.records)
+    assert "Event Value" not in rows[0]
+    assert "event_value" not in rows[0]
 
 
 def test_transform_later_install_time_wins_from_either_report_position(
