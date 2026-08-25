@@ -50,4 +50,8 @@ jobs:
           DB_TABLE: appsflyer_purchase_events
           APPSFLYER_API_TOKEN: test-token
           APPSFLYER_APP_IDS: id1458505230
+          # APPSFLYER_MEDIA_SOURCE / APPSFLYER_EVENT_NAMES are deliberately NOT
+          # set here (BAF-11 stage 1). The integration tests never read them, and
+          # an ambient value would leak into the unit tests that assert the
+          # unset-means-no-filter behavior. The tests clear them explicitly too.
         run: uv run pytest --cov-fail-under=98

@@ -222,10 +222,35 @@ def _warn_if_before_retention_floor(day: datetime.date, what: str) -> None:
         )
 
 
+def _log_filter_mode(settings: Settings) -> None:
+    """Say once per run which rows this run is even eligible to load.
+
+    Since BAF-11 stage 1 that is a config decision, not a constant, and the two
+    modes differ by orders of magnitude (7,707 unfiltered event rows/day vs. a
+    couple of dozen Meta purchases, measured 2026-08-13). Unfiltered is the
+    wide-blast-radius mode and is logged at WARNING deliberately: until stage 5
+    routes the full export to its own table, an unnoticed unfiltered run pours
+    every media source into BAF-2's `appsflyer_events_fb`. Downgrade this to
+    INFO once that routing exists.
+    """
+    media_source = settings.appsflyer_media_source
+    event_names = settings.appsflyer_event_names
+    shown_media_source = f"'{media_source}'" if media_source is not None else "<all>"
+    shown_event_names = ",".join(event_names) if event_names is not None else "<all>"
+    message = f"filter mode: media_source={shown_media_source} event_name={shown_event_names}"
+    if media_source is None or event_names is None:
+        logger.warning(
+            "%s — UNFILTERED pull, every matching row lands in `%s`", message, settings.db_table
+        )
+    else:
+        logger.info(message)
+
+
 def _run_window(start: datetime.date, end: datetime.date, *, dry_run: bool) -> RunSummary:
     """Shared core for run_backfill/run_daily: preflight, then a sequential loop."""
     settings = get_settings()
     engine = create_engine(settings)
+    _log_filter_mode(settings)
 
     if not dry_run:
         status = check_connection(engine, settings.db_table)

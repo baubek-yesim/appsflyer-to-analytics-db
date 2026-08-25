@@ -141,6 +141,47 @@ def test_transform_filters_out_non_matching_media_source() -> None:
     assert rows == []
 
 
+def test_transform_keeps_every_media_source_when_filter_unset() -> None:
+    """BAF-11 stage 1: with no media-source filter the client-side re-filter has
+    to disappear entirely, not degrade into a comparison. Organic rows carry an
+    EMPTY Media Source, so a predicate built from None would drop exactly the
+    rows the full raw export exists to capture.
+    """
+    df = _df(
+        [
+            _raw_row(**{"Media Source": "Facebook Ads", "AppsFlyer ID": "af-id-1"}),
+            _raw_row(**{"Media Source": "Google Ads", "AppsFlyer ID": "af-id-2"}),
+            _raw_row(**{"Media Source": "", "AppsFlyer ID": "af-id-3"}),
+        ]
+    )
+    rows = transform_events(
+        df,
+        attribution_type="non_organic",
+        app_id="id1458505230",
+        media_source_filter=None,
+        event_names_filter=["af_purchase", "af_purchase_YC"],
+    )
+    assert [row["media_source"] for row in rows] == ["Facebook Ads", "Google Ads", ""]
+
+
+def test_transform_keeps_every_event_name_when_filter_unset() -> None:
+    df = _df(
+        [
+            _raw_row(**{"Event Name": "af_purchase", "AppsFlyer ID": "af-id-1"}),
+            _raw_row(**{"Event Name": "af_login", "AppsFlyer ID": "af-id-2"}),
+            _raw_row(**{"Event Name": "install", "AppsFlyer ID": "af-id-3"}),
+        ]
+    )
+    rows = transform_events(
+        df,
+        attribution_type="non_organic",
+        app_id="id1458505230",
+        media_source_filter="Facebook Ads",
+        event_names_filter=None,
+    )
+    assert [row["event_name"] for row in rows] == ["af_purchase", "af_login", "install"]
+
+
 def test_transform_filters_out_non_matching_event_name() -> None:
     df = _df([_raw_row(**{"Event Name": "af_login"})])
     rows = transform_events(
