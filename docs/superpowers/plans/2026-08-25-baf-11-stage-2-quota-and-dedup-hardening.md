@@ -858,6 +858,329 @@ git commit -m "BAF-11 stage 2: dedupe key discriminator + skip-not-raise on miss
 
 ---
 
+## Addendum: post-final-review fixes (added 2026-08-25, after Tasks 1-3 landed)
+
+The final whole-branch review (range `c47393f..5c36ddc`) found one Important, runtime-behavior-changing
+issue and a cluster of cheap documentation/observability gaps. Full report is in
+`.superpowers/sdd/2026-08-25-baf-11-stage-2-quota-and-dedup-hardening/` (final-review notes, not a
+separate file — see the SDD ledger). Tasks 4-5 below close the reviewer's "must fix before PR" item
+and its recommended documentation bundle. The reviewer's remaining Minor findings (#5 raw-value log
+exposure, #7 no risk-table row for skip-and-count, #8 per-row parse failures still raise, #9
+`scripts/load_csv.py`/SQL migration key divergence, #10 untested deep-recursion edges) are explicitly
+deferred to a future stage — they are pre-existing conditions this plan doesn't worsen in a way that
+blocks a PR, per the reviewer's own tiering ("Ready to merge: With fixes" naming only issue #1 as
+blocking).
+
+### Task 4: Isolate split-and-retry failures; log when a window is bisected
+
+**Files:**
+- Modify: `src/appsflyer_pipeline/appsflyer_client.py`
+- Test: `tests/test_appsflyer_client.py`
+
+**Interfaces:**
+- Consumes: `fetch_events(...)` — same public signature, no change.
+- Produces: nothing new consumed by later tasks — this is the last task in this plan.
+
+**Context:** `fetch_events` (`appsflyer_client.py:173-257`) recursively bisects a date window when a
+response hits `maximum_rows`, then does `return pl.concat([first_half, second_half])`
+(`appsflyer_client.py:257`) with no exception handling. Every *other* polars/HTTP failure in this
+module is deliberately translated into `AppsFlyerAPIError` so `_process_window`
+(`pipeline.py:168`, which catches only `(AppsFlyerAPIError, TransformError, PipelineError)` —
+confirmed not to catch bare `Exception`) treats it as a per-window failure instead of crashing the
+whole run. `pl.concat`'s default `how="vertical"` raises `polars.exceptions.ShapeError` (confirmed
+empirically: `pl.concat([pl.DataFrame({"x": ["1"], "y": ["2"]}), pl.DataFrame({"x": ["1"], "z": ["2"]})])`
+raises `ShapeError('unable to vstack, column names don't match: "y" and "z"')` — a subclass of
+`polars.exceptions.PolarsError`) if the two halves' columns ever differ, e.g. if AppsFlyer's header
+set drifts between two calls seconds apart. Low likelihood, but it breaks the module's own
+isolation contract, and the module currently imports no `logging` at all, so a bisection is
+invisible in the operational log even though it can cost many extra report downloads against a
+~6-7/day quota (`docs/design-spec.md:138`).
+
+- [ ] **Step 1: Write the failing test for concat-failure isolation**
+
+Add to `tests/test_appsflyer_client.py`, after `test_fetch_events_splits_window_when_response_hits_maximum_rows`:
+
+```python
+MISMATCHED_CSV = (
+    "Attributed Touch Time,Install Time,Event Time,Event Name,Event Revenue,"
+    "Media Source,AppsFlyer ID,Customer User ID\n"  # missing "Campaign" vs SAMPLE_CSV
+    "2026-05-20 10:00:00,2026-05-19 09:00:00,2026-05-20 10:05:00,af_purchase,9.99,"
+    "Facebook Ads,af-id-9,user-9\n"
+)
+
+
+@respx.mock
+def test_fetch_events_wraps_concat_failure_as_appsflyer_error(caplog: pytest.LogCaptureFixture) -> None:
+    """If AppsFlyer's column set drifts between the two halves of a bisected
+    window, pl.concat raises ShapeError -- this must surface as
+    AppsFlyerAPIError (per-window failure), not crash the whole run, matching
+    every other upstream-data failure in this module.
+    """
+
+    def _responder(request: httpx.Request) -> httpx.Response:
+        params = request.url.params
+        if (params["from"], params["to"]) == ("2026-05-01", "2026-05-20"):
+            return httpx.Response(200, text=TWO_ROW_CSV)  # == maximum_rows -> looks truncated
+        if (params["from"], params["to"]) == ("2026-05-01", "2026-05-10"):
+            return httpx.Response(200, text=SAMPLE_CSV)
+        return httpx.Response(200, text=MISMATCHED_CSV)  # second half: different columns
+
+    respx.get(_url("id123", "non_organic")).mock(side_effect=_responder)
+    with (
+        httpx.Client() as client,
+        pytest.raises(AppsFlyerAPIError, match="Could not combine split halves"),
+    ):
+        fetch_events(
+            client,
+            app_id="id123",
+            attribution_type="non_organic",
+            from_date=datetime.date(2026, 5, 1),
+            to_date=datetime.date(2026, 5, 20),
+            api_token="token",
+            media_source="Facebook Ads",
+            event_names=["af_purchase"],
+            maximum_rows=2,
+        )
+```
+
+- [ ] **Step 2: Run it, confirm it fails**
+
+Run: `uv run pytest tests/test_appsflyer_client.py -k concat_failure -v`
+Expected: FAIL — `ShapeError` propagates uncaught instead of `AppsFlyerAPIError` being raised.
+
+- [ ] **Step 3: Write the failing test for the bisection log line**
+
+Add to `tests/test_appsflyer_client.py`, right after the test from Step 1:
+
+```python
+@respx.mock
+def test_fetch_events_logs_when_window_is_split(caplog: pytest.LogCaptureFixture) -> None:
+    """A bisection can multiply report-download quota spend several times
+    over (docs/design-spec.md's ~6-7/day-per-combo quota) -- it must be
+    visible in the log, not just in the eventual row count.
+    """
+    respx.get(_url("id123", "non_organic")).mock(side_effect=_split_then_flat_responder)
+    with (
+        caplog.at_level(logging.WARNING, logger="appsflyer_pipeline.appsflyer_client"),
+        httpx.Client() as client,
+    ):
+        fetch_events(
+            client,
+            app_id="id123",
+            attribution_type="non_organic",
+            from_date=datetime.date(2026, 5, 1),
+            to_date=datetime.date(2026, 5, 20),
+            api_token="token",
+            media_source="Facebook Ads",
+            event_names=["af_purchase"],
+            maximum_rows=2,
+        )
+    assert any(
+        "id123" in record.message and "2026-05-01" in record.message and "2026-05-20" in record.message
+        for record in caplog.records
+    )
+```
+
+This reuses the two-halves-under-cap shape from `test_fetch_events_splits_window_when_response_hits_maximum_rows`.
+Factor that test's `_responder` out to a module-level function named `_split_then_flat_responder`
+(same body, just renamed and hoisted out of the test function so both tests can use it), and update
+the existing test to reference it by name instead of defining it inline. Add `import logging` to the
+test file's imports.
+
+- [ ] **Step 4: Run both new tests, confirm they fail**
+
+Run: `uv run pytest tests/test_appsflyer_client.py -k "concat_failure or logs_when_window_is_split" -v`
+Expected: both FAIL (no log record exists yet for the second one, once Step 3's refactor compiles).
+
+- [ ] **Step 5: Implement — wrap concat, log the split**
+
+In `src/appsflyer_pipeline/appsflyer_client.py`, add `import logging` to the existing `import`
+block (alphabetically before `from io import BytesIO`), and add this line after the module-level
+constants (right after `DEFAULT_MAXIMUM_ROWS = 1_000_000`), matching `pipeline.py`'s and
+`transform.py`'s existing `logger = logging.getLogger(__name__)` pattern exactly:
+
+```python
+logger = logging.getLogger(__name__)
+```
+
+Replace the body from the `mid = ...` line to the end of `fetch_events`:
+
+```python
+    mid = from_date + (to_date - from_date) // 2
+    logger.warning(
+        "AppsFlyer response for %s [%s] %s..%s hit the %d-row cap -- splitting into "
+        "%s..%s and %s..%s (extra report-download quota spent)",
+        app_id,
+        attribution_type,
+        from_date,
+        to_date,
+        maximum_rows,
+        from_date,
+        mid,
+        mid + datetime.timedelta(days=1),
+        to_date,
+    )
+    first_half = fetch_events(
+        client,
+        app_id=app_id,
+        attribution_type=attribution_type,
+        from_date=from_date,
+        to_date=mid,
+        api_token=api_token,
+        media_source=media_source,
+        event_names=event_names,
+        timezone=timezone,
+        maximum_rows=maximum_rows,
+    )
+    second_half = fetch_events(
+        client,
+        app_id=app_id,
+        attribution_type=attribution_type,
+        from_date=mid + datetime.timedelta(days=1),
+        to_date=to_date,
+        api_token=api_token,
+        media_source=media_source,
+        event_names=event_names,
+        timezone=timezone,
+        maximum_rows=maximum_rows,
+    )
+    try:
+        return pl.concat([first_half, second_half])
+    except pl.exceptions.PolarsError as exc:
+        raise AppsFlyerAPIError(
+            f"Could not combine split halves [{attribution_type}] for {app_id} "
+            f"({from_date} to {to_date}): {exc}"
+        ) from exc
+```
+
+- [ ] **Step 6: Run the two new tests, confirm they pass**
+
+Run: `uv run pytest tests/test_appsflyer_client.py -k "concat_failure or logs_when_window_is_split" -v`
+Expected: PASS.
+
+- [ ] **Step 7: Run the full suite**
+
+Run: `uv run pytest -q`
+Expected: all pass, including the pre-existing
+`test_fetch_events_splits_window_when_response_hits_maximum_rows` unmodified in behavior (only its
+inline responder moved to module level).
+
+- [ ] **Step 8: Gates**
+
+Run: `uv run ruff check . && uv run ruff format --check . && uv run mypy`
+Expected: all clean.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src/appsflyer_pipeline/appsflyer_client.py tests/test_appsflyer_client.py
+git commit -m "BAF-11 stage 2: isolate split-retry concat failures, log bisection"
+```
+
+---
+
+### Task 5: Document `APPSFLYER_CHUNK_DAYS` and the chunk/row-cap quota interaction
+
+**Files:**
+- Modify: `deploy/appsflyer.env.example`
+- Modify: `deploy/user-level/appsflyer.env.example`
+- Modify: `docs/RUNBOOK.md`
+- Modify: `docs/design-spec.md`
+- Modify: `src/appsflyer_pipeline/config.py`
+
+**Interfaces:** Documentation/comment-only changes plus one docstring-adjacent comment fix in
+`config.py`. No behavior change, no tests (nothing here is executable logic).
+
+**Context:** `APPSFLYER_CHUNK_DAYS`'s sibling `APPSFLYER_DAILY_LOOKBACK_DAYS` is documented in both
+deploy env-example files and `docs/RUNBOOK.md`; `APPSFLYER_CHUNK_DAYS` is documented nowhere an
+operator would find it. Separately, at the *default* settings (`appsflyer_chunk_days=31`,
+`DEFAULT_MAXIMUM_ROWS=1_000_000`), an unfiltered run's 31-day chunk (~239k rows/day-equivalent,
+`appsflyer_client.py:38` measurement) would recurse to bisection depth 3, costing up to 15 report
+downloads against the ~6-7/day quota documented in `docs/design-spec.md:138` — not a regression today
+(filtered production traffic is ~242 rows per 31-day chunk, so `fetch_events` never actually
+recurses), but nothing currently connects `APPSFLYER_CHUNK_DAYS` to that future scenario as the
+mitigation. Also, `config.py`'s and `design-spec.md`'s "zero extra quota... at depths ≤31" claim
+about `APPSFLYER_DAILY_LOOKBACK_DAYS` is only true when `APPSFLYER_CHUNK_DAYS` is left at its
+default — worth a one-clause caveat now that the chunk width is configurable.
+
+- [ ] **Step 1: Add `APPSFLYER_CHUNK_DAYS` to both deploy env-example files**
+
+In `deploy/appsflyer.env.example`, right after the existing `#APPSFLYER_DAILY_LOOKBACK_DAYS=3` line
+and its comment block, add:
+
+```
+# Per-call date-window width, in days (BAF-11 stage 2). AppsFlyer's own hard
+# ceiling is 31; this only lets an operator go narrower, e.g. to shrink one
+# retry's blast radius, or to keep a single call safely under the client's
+# 1,000,000-row cap once the media-source/event-name filters above are ever
+# removed for the full raw-data export (an unfiltered 31-day chunk measures
+# roughly 239k rows/day-equivalent -- do the arithmetic for the day count
+# before widening the filters, since AppsFlyer's per-app quota is only
+# ~6-7 report downloads/day and a chunk that still exceeds the row cap gets
+# bisected, each half costing its own download). Default (unset): 31.
+#APPSFLYER_CHUNK_DAYS=31
+```
+
+Add the identical block (same comment, same default line) to
+`deploy/user-level/appsflyer.env.example` in the same relative position.
+
+- [ ] **Step 2: Add a RUNBOOK mention**
+
+In `docs/RUNBOOK.md`, right after the existing `APPSFLYER_DAILY_LOOKBACK_DAYS` paragraph (the one
+ending "...see `deploy/appsflyer.env.example` for the full rationale)."), add:
+
+```
+Optional: `APPSFLYER_CHUNK_DAYS` narrows the per-call date window below AppsFlyer's 31-day
+ceiling (default when unset: 31). Only relevant today for shrinking a retry's blast radius;
+becomes load-bearing if the media-source/event-name filters are ever removed (see
+`deploy/appsflyer.env.example` for the row-cap arithmetic) -- at that point it is the sizing
+mechanism that keeps a single call under the client's 1,000,000-row cap, since a chunk that
+still overflows gets bisected and each half costs its own report-download quota.
+```
+
+- [ ] **Step 3: Add `APPSFLYER_CHUNK_DAYS` to design-spec.md's config list**
+
+In `docs/design-spec.md`, in the "Config (env / `.env`)" bullet (the one listing
+`APPSFLYER_DAILY_LOOKBACK_DAYS (default 1)`, around line 103), add `APPSFLYER_CHUNK_DAYS`
+(default 31)` to the same comma-separated list, immediately after
+`` `APPSFLYER_DAILY_LOOKBACK_DAYS` (default 1)``.
+
+- [ ] **Step 4: Caveat the "zero extra quota" claim**
+
+In `docs/design-spec.md`'s risk table, in the row starting `| **Late/offline-cached events arrive
+after the daily pull**` (around line 139), change:
+
+```
+`APPSFLYER_DAILY_LOOKBACK_DAYS` re-pulls a trailing window daily — zero extra quota at depths ≤31 (still one report download per combo per run) and idempotent by construction.
+```
+
+to:
+
+```
+`APPSFLYER_DAILY_LOOKBACK_DAYS` re-pulls a trailing window daily — zero extra quota at depths ≤31, as long as `APPSFLYER_CHUNK_DAYS` is left at its default (still one report download per combo per run), and idempotent by construction.
+```
+
+Make the matching edit in `src/appsflyer_pipeline/config.py`'s comment above
+`appsflyer_daily_lookback_days` (the one ending "...and cost no extra API quota at N <= 31 (one
+report download per app/attribution regardless of range length)."), appending: "— as long as
+`appsflyer_chunk_days` is left at its default; a narrower chunk multiplies the download count
+directly."
+
+- [ ] **Step 5: Gates**
+
+Run: `uv run ruff check . && uv run ruff format --check . && uv run mypy`
+Expected: all clean (no source logic changed, only comments/docs — this just confirms nothing was
+accidentally broken by the `config.py` comment edit).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add deploy/appsflyer.env.example deploy/user-level/appsflyer.env.example docs/RUNBOOK.md docs/design-spec.md src/appsflyer_pipeline/config.py
+git commit -m "BAF-11 stage 2: document APPSFLYER_CHUNK_DAYS and its quota interaction"
+```
+
+---
+
 ## Final check before opening a PR
 
 - [ ] Run `uv run pre-commit run --all-files` — must be clean (this is what CI gates on).
