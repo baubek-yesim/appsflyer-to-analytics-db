@@ -88,7 +88,9 @@ class Settings(BaseSettings):
     # pull; deeper windows re-capture AppsFlyer late/offline-cached events (the
     # 05:00 +03 timer fires exactly at AppsFlyer's 02:00 UTC late-event boundary)
     # and cost no extra API quota at N <= 31 (one report download per
-    # app/attribution regardless of range length). Upper bound = the Pull API's
+    # app/attribution regardless of range length) — as long as
+    # `appsflyer_chunk_days` is left at its default; a narrower chunk multiplies
+    # the download count directly. Upper bound = the Pull API's
     # ~90-day retention (appsflyer_client.MAX_RETENTION_DAYS; literal here to
     # keep config free of package imports).
     appsflyer_daily_lookback_days: Annotated[int, Field(ge=1, le=90)] = 1
