@@ -11,6 +11,7 @@ Touch Time") — normalizing to the target schema is transform.py's job (Stage 4
 from __future__ import annotations
 
 import datetime
+import logging
 from io import BytesIO
 from typing import Literal
 
@@ -39,6 +40,8 @@ MAX_CHUNK_DAYS = 31
 # (probed 2026-08-13), so it can silently exceed that default. This raises the
 # ceiling to the client's own 1M-row hard cap (see fetch_events below).
 DEFAULT_MAXIMUM_ROWS = 1_000_000
+
+logger = logging.getLogger(__name__)
 
 
 class AppsFlyerAPIError(RuntimeError):
@@ -230,6 +233,19 @@ def fetch_events(
         )
 
     mid = from_date + (to_date - from_date) // 2
+    logger.warning(
+        "AppsFlyer response for %s [%s] %s..%s hit the %d-row cap -- splitting into "
+        "%s..%s and %s..%s (extra report-download quota spent)",
+        app_id,
+        attribution_type,
+        from_date,
+        to_date,
+        maximum_rows,
+        from_date,
+        mid,
+        mid + datetime.timedelta(days=1),
+        to_date,
+    )
     first_half = fetch_events(
         client,
         app_id=app_id,
@@ -254,7 +270,13 @@ def fetch_events(
         timezone=timezone,
         maximum_rows=maximum_rows,
     )
-    return pl.concat([first_half, second_half])
+    try:
+        return pl.concat([first_half, second_half])
+    except pl.exceptions.PolarsError as exc:
+        raise AppsFlyerAPIError(
+            f"Could not combine split halves [{attribution_type}] for {app_id} "
+            f"({from_date} to {to_date}): {exc}"
+        ) from exc
 
 
 def chunk_date_range(
