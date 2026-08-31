@@ -44,6 +44,19 @@ _COLUMN_MAP: dict[str, str] = {
 _TIMESTAMP_COLUMNS = ("event_time", "install_time", "attributed_touch_time")
 _REQUIRED_NOT_NULL = ("event_time", "event_name", "appsflyer_id")
 
+# Raw-only column read for dedup, never persisted (BAF-11 stage 2, Q6): on the
+# unfiltered full-array stream, two real events can share
+# (event_time, event_name, appsflyer_id) to the second and still be genuinely
+# different rows -- e.g. two screen_plans_cInternet events from one device in
+# one second with a different Event Value (measured live 2026-08-13: 5 such
+# rows in one conflict group). Folding this into the dedupe key stops those
+# from resolving to a single survivor. It is deliberately NOT added to
+# _COLUMN_MAP: ticket requirement #2 keeps in-app-events on the same 17-column
+# table, so this value is stripped back off every row before transform_events
+# returns (see the `del` in transform_events below).
+_DEDUPE_DISCRIMINATOR_RAW_COLUMN = "Event Value"
+_DEDUPE_DISCRIMINATOR_ROW_KEY = "__dedupe_event_value"
+
 
 class TransformError(RuntimeError):
     """Raised when raw AppsFlyer data doesn't match the expected shape."""
@@ -83,8 +96,8 @@ def _install_time_rank(row: dict[str, Any]) -> tuple[int, datetime.datetime]:
 def _dedupe_rows(
     rows: list[dict[str, Any]], *, attribution_type: AttributionType, app_id: str
 ) -> list[dict[str, Any]]:
-    """Keep exactly ONE row per (event_time, event_name, appsflyer_id) key: the
-    one with the latest `install_time`.
+    """Keep exactly ONE row per (event_time, event_name, appsflyer_id,
+    Event Value) key: the one with the latest `install_time`.
 
     `attribution_type`/`app_id` are constant across one transform_events call, so
     this 3-column key is covariant with Mark's full 4-column dedup key (BAF-2
@@ -104,6 +117,15 @@ def _dedupe_rows(
     (until 2026-08-13) cost the entire window, keeping both (2026-08-13..08-14)
     kept every row.
 
+    Event Value joined the key on BAF-11 stage 2 (2026-08-25): on the
+    unfiltered full-array stream, rows sharing the original 3-column key can
+    be genuinely distinct events rather than conflicting duplicates -- see
+    test_transform_keeps_both_rows_when_event_value_differs. The known
+    production conflict this function was built for (two purchases of
+    different amounts in the same second, distinguished by `Event Revenue`,
+    NOT `Event Value`) is unaffected by this change and still resolves via
+    the install_time tiebreak described below.
+
     The known cost, logged loudly: the one conflict actually measured in
     production (2026-08-13, 3 vs 4 EUR at 2026-07-19 04:26:43 in a 242-row
     window) is two distinct purchases by one user in the same second. They share
@@ -114,16 +136,21 @@ def _dedupe_rows(
     Exact duplicates still collapse separately: identical bytes carry no
     information that picking one of them could lose.
     """
-    slot_of_key: dict[tuple[Any, Any, Any], int] = {}
+    slot_of_key: dict[tuple[Any, Any, Any, Any], int] = {}
     kept: list[dict[str, Any]] = []
     duplicate_count = 0
     conflict_count = 0
     tie_count = 0
     discarded_revenue = Decimal(0)
-    first_conflict: tuple[Any, Any, Any] | None = None
+    first_conflict: tuple[Any, Any, Any, Any] | None = None
 
     for row in rows:
-        key = (row["event_time"], row["event_name"], row["appsflyer_id"])
+        key = (
+            row["event_time"],
+            row["event_name"],
+            row["appsflyer_id"],
+            row[_DEDUPE_DISCRIMINATOR_ROW_KEY],
+        )
         slot = slot_of_key.get(key)
         if slot is None:
             slot_of_key[key] = len(kept)
@@ -208,7 +235,9 @@ def transform_events(
     now resolves to a single row (latest `install_time`) rather than keeping
     both — see `_dedupe_rows`.
     """
-    missing = [raw for raw in _COLUMN_MAP if raw not in df.columns]
+    missing = [
+        raw for raw in (*_COLUMN_MAP, _DEDUPE_DISCRIMINATOR_RAW_COLUMN) if raw not in df.columns
+    ]
     if missing:
         raise TransformError(
             f"AppsFlyer response is missing expected column(s): {missing} "
@@ -238,18 +267,33 @@ def transform_events(
         filtered = filtered.filter(predicate)
 
     rows: list[dict[str, Any]] = []
-    for raw_row in filtered.select(list(_COLUMN_MAP)).iter_rows(named=True):
+    skipped_missing_required = 0
+    select_columns = [*_COLUMN_MAP, _DEDUPE_DISCRIMINATOR_RAW_COLUMN]
+    for raw_row in filtered.select(select_columns).iter_rows(named=True):
         row: dict[str, Any] = {target: raw_row[raw] for raw, target in _COLUMN_MAP.items()}
+        row[_DEDUPE_DISCRIMINATOR_ROW_KEY] = raw_row[_DEDUPE_DISCRIMINATOR_RAW_COLUMN]
         for ts_col in _TIMESTAMP_COLUMNS:
             row[ts_col] = _parse_timestamp(row[ts_col])
         row["event_revenue"] = _parse_revenue(row["event_revenue"])
         row["attribution_type"] = attribution_type
         row["app_id"] = app_id
 
-        for required in _REQUIRED_NOT_NULL:
-            if not row[required]:
-                raise TransformError(f"Row has NULL/blank required field {required!r}: {row}")
+        if any(not row[required] for required in _REQUIRED_NOT_NULL):
+            skipped_missing_required += 1
+            continue
 
         rows.append(row)
 
-    return _dedupe_rows(rows, attribution_type=attribution_type, app_id=app_id)
+    if skipped_missing_required:
+        logger.warning(
+            "skipped %d row(s) missing a required field (%s): attribution_type=%s app_id=%s",
+            skipped_missing_required,
+            ", ".join(_REQUIRED_NOT_NULL),
+            attribution_type,
+            app_id,
+        )
+
+    deduped = _dedupe_rows(rows, attribution_type=attribution_type, app_id=app_id)
+    for row in deduped:
+        del row[_DEDUPE_DISCRIMINATOR_ROW_KEY]
+    return deduped

@@ -16,10 +16,10 @@ from appsflyer_pipeline.loader import ConnectionStatus, PipelineError
 from appsflyer_pipeline.pipeline import _iter_work_items, run_backfill, run_daily
 
 SAMPLE_CSV = (
-    "Attributed Touch Time,Install Time,Event Time,Event Name,Event Revenue,"
+    "Attributed Touch Time,Install Time,Event Time,Event Name,Event Value,Event Revenue,"
     "Media Source,Channel,Campaign,Campaign ID,Adset,Adset ID,Ad,Ad ID,"
     "AppsFlyer ID,Customer User ID,Is Primary Attribution\n"
-    "2026-05-20 10:00:00,2026-05-19 09:00:00,2026-05-20 10:05:00,af_purchase,9.99,"
+    "2026-05-20 10:00:00,2026-05-19 09:00:00,2026-05-20 10:05:00,af_purchase,af-value-1,9.99,"
     "Facebook Ads,Social,Summer Sale,cmp-1,Adset A,adset-1,Ad A,ad-1,af-id-1,user-1,true\n"
 )
 MISSING_COLUMN_CSV = "Event Name\naf_purchase\n"
@@ -46,6 +46,7 @@ _OPTIONAL_ENV_KEYS = (
     "APPSFLYER_EVENT_NAMES",
     "APPSFLYER_TIMEZONE",
     "APPSFLYER_DAILY_LOOKBACK_DAYS",
+    "APPSFLYER_CHUNK_DAYS",
     "APPSFLYER_EVENT_TIME_FROM",
     "APPSFLYER_EVENT_TIME_TO",
 )
@@ -145,6 +146,21 @@ def test_iter_work_items_yields_expected_matrix(monkeypatch: pytest.MonkeyPatch)
     assert one_series[-1][1] == end
     assert all((e - s).days < 31 for s, e in one_series)
     assert len(items) == len(APP_IDS) * len(ATTRIBUTION_TYPES) * len(one_series)
+
+
+def test_iter_work_items_respects_configured_chunk_days(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_env(monkeypatch, APPSFLYER_CHUNK_DAYS="10")
+    settings = get_settings()
+    start = datetime.date(2026, 1, 1)
+    end = datetime.date(2026, 1, 31)  # 31 days -> 4 chunks of <=10 days each
+
+    items = list(_iter_work_items(settings, start, end))
+
+    one_series = [(s, e) for a, t, s, e in items if a == "app1" and t == "non_organic"]
+    assert all((e - s).days < 10 for s, e in one_series)
+    assert len(one_series) == 4
 
 
 @respx.mock

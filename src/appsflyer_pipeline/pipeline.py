@@ -100,7 +100,9 @@ def _iter_work_items(
     """
     for app_id in settings.appsflyer_app_ids:
         for attribution_type in ATTRIBUTION_TYPES:
-            for chunk_start, chunk_end in chunk_date_range(start, end):
+            for chunk_start, chunk_end in chunk_date_range(
+                start, end, max_days=settings.appsflyer_chunk_days
+            ):
                 yield app_id, attribution_type, chunk_start, chunk_end
 
 

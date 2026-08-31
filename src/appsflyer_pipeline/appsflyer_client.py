@@ -11,6 +11,7 @@ Touch Time") — normalizing to the target schema is transform.py's job (Stage 4
 from __future__ import annotations
 
 import datetime
+import logging
 from io import BytesIO
 from typing import Literal
 
@@ -32,6 +33,15 @@ _REQUEST_TIMEOUT = 120.0
 # and at most 31 days of data can be requested per call.
 MAX_RETENTION_DAYS = 90
 MAX_CHUNK_DAYS = 31
+
+# BAF-11 stage 2: AppsFlyer's Pull API defaults to truncating a report at
+# maximum_rows=200,000 with no error -- a normal 200 response, just short.
+# A 31-day chunk on the unfiltered stream measures ~239k rows/day-equivalent
+# (probed 2026-08-13), so it can silently exceed that default. This raises the
+# ceiling to the client's own 1M-row hard cap (see fetch_events below).
+DEFAULT_MAXIMUM_ROWS = 1_000_000
+
+logger = logging.getLogger(__name__)
 
 
 class AppsFlyerAPIError(RuntimeError):
@@ -63,12 +73,14 @@ def _fetch_csv(
     media_source: str | None,
     event_names: list[str] | None,
     timezone: str | None = None,
+    maximum_rows: int = DEFAULT_MAXIMUM_ROWS,
 ) -> bytes:
     endpoint = _ENDPOINT_BY_ATTRIBUTION[attribution_type]
     url = f"{_BASE_URL}/{app_id}/{endpoint}/v5"
-    params = {
+    params: dict[str, str | int] = {
         "from": from_date.isoformat(),
         "to": to_date.isoformat(),
+        "maximum_rows": maximum_rows,
     }
     # BAF-11 stage 1: None means "no server-side filter", which has to be an
     # ABSENT param. Sending `media_source=` (empty) instead would be a filter
@@ -97,7 +109,7 @@ def _fetch_csv(
     return response.content
 
 
-def fetch_events(
+def _fetch_and_parse(
     client: httpx.Client,
     *,
     app_id: str,
@@ -107,22 +119,13 @@ def fetch_events(
     api_token: str,
     media_source: str | None,
     event_names: list[str] | None,
-    timezone: str | None = None,
+    timezone: str | None,
+    maximum_rows: int,
 ) -> pl.DataFrame:
-    """Fetch one app/attribution-type/date-range chunk as a raw DataFrame.
-
-    `media_source`/`event_names` are optional filters (BAF-11 stage 1): None
-    omits the param entirely, so AppsFlyer returns every media source / every
-    event name for the window.
-
-    Returns an empty DataFrame when AppsFlyer has no matching events for the
-    window — delivered as a headers-only CSV, a legitimately common case. A
-    truly EMPTY response body is an upstream anomaly and raises
-    AppsFlyerAPIError instead (issue #26).
-
-    `timezone` (issue #53) selects the timezone AppsFlyer expresses the report
-    in — both the event-time values and the from/to day boundaries. None (the
-    default) means UTC.
+    """One HTTP call for exactly [from_date, to_date] -- no splitting, no
+    row-cap decision. `fetch_events` is the public entry point; this is its
+    single-window building block, factored out so `fetch_events` can call it
+    twice on a truncated response without duplicating the error handling.
     """
     try:
         content = _fetch_csv(
@@ -135,6 +138,7 @@ def fetch_events(
             media_source=media_source,
             event_names=event_names,
             timezone=timezone,
+            maximum_rows=maximum_rows,
         )
     except httpx.HTTPStatusError as exc:
         raise AppsFlyerAPIError(
@@ -161,18 +165,118 @@ def fetch_events(
     # all-null column guessed as Int64 in one chunk, Utf8 in another) must
     # not be allowed to diverge between them. transform.py applies real types.
     try:
-        df = pl.read_csv(BytesIO(content), infer_schema_length=0)
+        return pl.read_csv(BytesIO(content), infer_schema_length=0)
     except (pl.exceptions.ComputeError, pl.exceptions.NoDataError) as exc:
         raise AppsFlyerAPIError(
             f"AppsFlyer returned an unparseable CSV [{attribution_type}] for {app_id} "
             f"({from_date} to {to_date}): {exc}"
         ) from exc
-    if df.height >= 1_000_000:
+
+
+def fetch_events(
+    client: httpx.Client,
+    *,
+    app_id: str,
+    attribution_type: AttributionType,
+    from_date: datetime.date,
+    to_date: datetime.date,
+    api_token: str,
+    media_source: str | None,
+    event_names: list[str] | None,
+    timezone: str | None = None,
+    maximum_rows: int = DEFAULT_MAXIMUM_ROWS,
+) -> pl.DataFrame:
+    """Fetch one app/attribution-type/date-range chunk as a raw DataFrame.
+
+    `media_source`/`event_names` are optional filters (BAF-11 stage 1): None
+    omits the param entirely, so AppsFlyer returns every media source / every
+    event name for the window.
+
+    Returns an empty DataFrame when AppsFlyer has no matching events for the
+    window — delivered as a headers-only CSV, a legitimately common case. A
+    truly EMPTY response body is an upstream anomaly and raises
+    AppsFlyerAPIError instead (issue #26).
+
+    `timezone` (issue #53) selects the timezone AppsFlyer expresses the report
+    in — both the event-time values and the from/to day boundaries. None (the
+    default) means UTC.
+
+    `maximum_rows` (BAF-11 stage 2) is sent on every request to raise
+    AppsFlyer's own silent-truncation default (200,000) — see the module
+    docstring on DEFAULT_MAXIMUM_ROWS. If a response comes back with exactly
+    `maximum_rows` rows, that is itself evidence of truncation (a complete
+    report would have returned fewer), so the window is split in half and each
+    half is fetched (and, if still truncated, split again) instead of loading
+    a silently incomplete window. A single day that still hits the cap cannot
+    be split further and raises AppsFlyerAPIError.
+    """
+    df = _fetch_and_parse(
+        client,
+        app_id=app_id,
+        attribution_type=attribution_type,
+        from_date=from_date,
+        to_date=to_date,
+        api_token=api_token,
+        media_source=media_source,
+        event_names=event_names,
+        timezone=timezone,
+        maximum_rows=maximum_rows,
+    )
+    if df.height < maximum_rows:
+        return df
+
+    if from_date == to_date:
         raise AppsFlyerAPIError(
             f"Report for {app_id} [{attribution_type}] {from_date}..{to_date} hit the "
-            f"Pull API 1M-row cap — data is likely truncated; split the window into smaller chunks."
+            f"{maximum_rows}-row cap on a single day — data is likely truncated and the "
+            f"window cannot be split any further."
         )
-    return df
+
+    mid = from_date + (to_date - from_date) // 2
+    logger.warning(
+        "AppsFlyer response for %s [%s] %s..%s hit the %d-row cap -- splitting into "
+        "%s..%s and %s..%s (extra report-download quota spent)",
+        app_id,
+        attribution_type,
+        from_date,
+        to_date,
+        maximum_rows,
+        from_date,
+        mid,
+        mid + datetime.timedelta(days=1),
+        to_date,
+    )
+    first_half = fetch_events(
+        client,
+        app_id=app_id,
+        attribution_type=attribution_type,
+        from_date=from_date,
+        to_date=mid,
+        api_token=api_token,
+        media_source=media_source,
+        event_names=event_names,
+        timezone=timezone,
+        maximum_rows=maximum_rows,
+    )
+    second_half = fetch_events(
+        client,
+        app_id=app_id,
+        attribution_type=attribution_type,
+        from_date=mid + datetime.timedelta(days=1),
+        to_date=to_date,
+        api_token=api_token,
+        media_source=media_source,
+        event_names=event_names,
+        timezone=timezone,
+        maximum_rows=maximum_rows,
+    )
+    try:
+        return pl.concat([first_half, second_half])
+    except pl.exceptions.PolarsError as exc:
+        raise AppsFlyerAPIError(
+            f"Could not combine split halves [{attribution_type}] for {app_id} "
+            f"({from_date} to {to_date}): {exc}"
+        ) from exc
 
 
 def chunk_date_range(

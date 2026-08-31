@@ -27,6 +27,7 @@ _OPTIONAL_ENV_KEYS = (
     "APPSFLYER_EVENT_NAMES",
     "APPSFLYER_TIMEZONE",
     "APPSFLYER_DAILY_LOOKBACK_DAYS",
+    "APPSFLYER_CHUNK_DAYS",
     "APPSFLYER_EVENT_TIME_FROM",
     "APPSFLYER_EVENT_TIME_TO",
 )
@@ -175,6 +176,21 @@ def test_daily_lookback_accepts_valid_depth(monkeypatch: pytest.MonkeyPatch) -> 
 def test_daily_lookback_out_of_bounds_rejected(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
     with pytest.raises(ValidationError):
         _settings(monkeypatch, APPSFLYER_DAILY_LOOKBACK_DAYS=raw)
+
+
+def test_chunk_days_defaults_to_31(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _settings(monkeypatch).appsflyer_chunk_days == 31
+
+
+def test_chunk_days_accepts_valid_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _settings(monkeypatch, APPSFLYER_CHUNK_DAYS="10")
+    assert settings.appsflyer_chunk_days == 10
+
+
+@pytest.mark.parametrize("raw", ["0", "-3", "32", "not-a-number"])
+def test_chunk_days_out_of_bounds_rejected(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+    with pytest.raises(ValidationError):
+        _settings(monkeypatch, APPSFLYER_CHUNK_DAYS=raw)
 
 
 def test_event_time_window_parses_dates(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -110,6 +110,13 @@ window ending yesterday, re-capturing AppsFlyer late/offline-cached events at no
 report-download quota (default when unset: 1 = yesterday only; see
 `deploy/appsflyer.env.example` for the full rationale).
 
+Optional: `APPSFLYER_CHUNK_DAYS` narrows the per-call date window below AppsFlyer's 31-day
+ceiling (default when unset: 31). Only relevant today for shrinking a retry's blast radius;
+becomes load-bearing if the media-source/event-name filters are ever removed (see
+`deploy/appsflyer.env.example` for the row-cap arithmetic) -- at that point it is the sizing
+mechanism that keeps a single call under the client's 1,000,000-row cap, since a chunk that
+still overflows gets bisected and each half costs its own report-download quota.
+
 `APPSFLYER_TIMEZONE=Europe/Riga` (issue #53) makes AppsFlyer express report times — and
 interpret the from/to day boundaries — in that zone instead of UTC. Required in this
 deployment: the analytics team's reference exports are Europe/Riga, and UTC pulls land
