@@ -38,7 +38,23 @@ APP_IDS = ("app1", "app2")
 ATTRIBUTION_TYPES = ("non_organic", "retargeting")
 
 
+# Optional keys with no default (BAF-11 stage 1 made the two filters optional):
+# an ambient value from the developer's shell or a CI `env:` block would change
+# which rows a run pulls, so clear them unless the test names them.
+_OPTIONAL_ENV_KEYS = (
+    "APPSFLYER_MEDIA_SOURCE",
+    "APPSFLYER_EVENT_NAMES",
+    "APPSFLYER_TIMEZONE",
+    "APPSFLYER_DAILY_LOOKBACK_DAYS",
+    "APPSFLYER_EVENT_TIME_FROM",
+    "APPSFLYER_EVENT_TIME_TO",
+)
+
+
 def _set_env(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> None:
+    for key in _OPTIONAL_ENV_KEYS:
+        if key not in overrides:
+            monkeypatch.delenv(key, raising=False)
     for key, value in {**BASE_ENV, **overrides}.items():
         monkeypatch.setenv(key, value)
     get_settings.cache_clear()
@@ -161,6 +177,72 @@ def test_run_daily_dry_run_skips_load(
     assert summary.total_fetched == len(APP_IDS) * len(ATTRIBUTION_TYPES)
     assert summary.total_loaded == len(APP_IDS) * len(ATTRIBUTION_TYPES)
     assert summary.all_succeeded
+
+
+@respx.mock
+def test_run_daily_omits_filter_params_when_filters_unset(
+    monkeypatch: pytest.MonkeyPatch, load_spy: list[dict[str, Any]]
+) -> None:
+    """BAF-11 stage 1 end-to-end: unset filters must reach the wire as ABSENT
+    params, not as empty ones — the config -> client path is where a default
+    could silently sneak back in.
+    """
+    _set_env(monkeypatch)
+    _mock_all_ok()
+
+    summary = run_daily(date=datetime.date(2026, 5, 20))
+
+    assert summary.all_succeeded
+    for call in respx.calls:
+        assert "media_source" not in call.request.url.params
+        assert "event_name" not in call.request.url.params
+
+
+@respx.mock
+def test_run_daily_logs_the_effective_filter_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    load_spy: list[dict[str, Any]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Which rows a run is even eligible to load is now a config decision, so the
+    run has to say out loud which mode it is in — once per run, before any
+    request. Unfiltered is the wide-blast-radius mode and is logged at WARNING:
+    until stage 5 routes it to its own table, an unnoticed unfiltered run would
+    pour every media source into BAF-2's `appsflyer_events_fb`.
+    """
+    _set_env(monkeypatch)
+    _mock_all_ok()
+
+    with caplog.at_level(logging.INFO, logger="appsflyer_pipeline.pipeline"):
+        run_daily(date=datetime.date(2026, 5, 20))
+
+    unfiltered = [r for r in caplog.records if "media_source=<all>" in r.message]
+    assert len(unfiltered) == 1
+    assert unfiltered[0].levelno == logging.WARNING
+    assert "event_name=<all>" in unfiltered[0].message
+
+
+@respx.mock
+def test_run_daily_logs_named_filters_at_info(
+    monkeypatch: pytest.MonkeyPatch,
+    load_spy: list[dict[str, Any]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _set_env(
+        monkeypatch,
+        APPSFLYER_MEDIA_SOURCE="Facebook Ads",
+        APPSFLYER_EVENT_NAMES="af_purchase,af_purchase_YC",
+    )
+    _mock_all_ok()
+
+    with caplog.at_level(logging.INFO, logger="appsflyer_pipeline.pipeline"):
+        run_daily(date=datetime.date(2026, 5, 20))
+
+    mode = [r for r in caplog.records if "filter mode:" in r.message]
+    assert len(mode) == 1
+    assert mode[0].levelno == logging.INFO
+    assert "media_source='Facebook Ads'" in mode[0].message
+    assert "event_name=af_purchase,af_purchase_YC" in mode[0].message
 
 
 @respx.mock

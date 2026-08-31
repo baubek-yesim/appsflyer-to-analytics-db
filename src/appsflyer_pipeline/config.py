@@ -66,12 +66,22 @@ class Settings(BaseSettings):
         "id1458505230",
     ]
 
-    # Run parameters — defaulted to the BAF-2 acceptance criteria, overridable via env.
-    appsflyer_media_source: RequiredStr = "Facebook Ads"
-    appsflyer_event_names: Annotated[CsvList, Field(min_length=1)] = [
-        "af_purchase",
-        "af_purchase_YC",
-    ]
+    # Run parameters — three-valued since BAF-11 stage 1:
+    #   unset          -> no filter at all; the param never reaches the API and
+    #                     transform keeps every row (the full raw export)
+    #   named value(s) -> BAF-2's behavior, filtered server-side AND client-side
+    #   present-but-blank -> ValidationError, NOT "no filter"
+    # The blank case matters: a truncated EnvironmentFile line (issue #9) must
+    # still abort startup. The only way to ask for the full export is to leave
+    # the key out entirely, which no environment does by accident — `.env.example`,
+    # both deploy templates and CI's pytest step all name the filters explicitly.
+    # NOTE the default flipped here: BAF-2 defaulted to "Facebook Ads" /
+    # af_purchase,af_purchase_YC, so an environment that never set these keys
+    # widens to every media source on upgrade. That is why `_run_window` logs
+    # the unfiltered mode at WARNING until stage 5 gives the full export its own
+    # table — today it would land in BAF-2's `appsflyer_events_fb`.
+    appsflyer_media_source: RequiredStr | None = None
+    appsflyer_event_names: Annotated[CsvList, Field(min_length=1)] | None = None
 
     # Daily trailing-window depth (issue #8): the scheduled `daily` run pulls
     # [yesterday - (N-1), yesterday]. Default 1 preserves the original single-day
