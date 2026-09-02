@@ -32,7 +32,7 @@ source data than the scripts themselves (see "Where the scripts would corrupt da
 | Daily window | from = to = yesterday (pipeline default `APPSFLYER_DAILY_LOOKBACK_DAYS=1`) |
 | Chunk walk | inclusive boundaries, next chunk starts at prev end + 1 day |
 | Loop order | app_id → [non_organic, retargeting] → chunks |
-| Target columns | the same 17 (15 mapped + `attribution_type` + `app_id`); scripts' lowercase/underscore normalization of the 15 raw headers maps 1:1 to the pipeline's explicit `_COLUMN_MAP` |
+| Target columns | the same 17 (15 mapped + `attribution_type` + `app_id`); scripts' lowercase/underscore normalization of the 15 raw headers maps 1:1 to the pipeline's explicit `reports._IN_APP_EVENTS_COLUMN_MAP` |
 
 Chunk size differs — scripts 30 days, pipeline 31 (`MAX_CHUNK_DAYS`, the API's per-call cap per
 the same BAF-2 comment). Verified: identical date-range union, identical request count (3 per
