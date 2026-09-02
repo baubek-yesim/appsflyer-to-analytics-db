@@ -58,12 +58,17 @@ from appsflyer_pipeline.cli import (
 )
 from appsflyer_pipeline.config import get_settings
 from appsflyer_pipeline.loader import (
-    _INSERT_COLUMNS,  # reusing the loader's single source of truth for column order
     PipelineError,
     _validate_identifier,  # same identifier-safety gate loader.py itself uses
     check_connection,
     create_engine,
 )
+from appsflyer_pipeline.reports import REPORTS
+
+# BAF-11 stage 3: _INSERT_COLUMNS moved from loader.py into the ReportSpec
+# registry -- this script only ever loads into the in-app-events table, so it
+# reads that one spec's column order (identical to the retargeting spec's).
+_INSERT_COLUMNS = REPORTS["in_app_events_non_organic"].insert_columns
 
 logger = logging.getLogger(__name__)
 

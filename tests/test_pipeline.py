@@ -14,6 +14,7 @@ from appsflyer_pipeline.appsflyer_client import MAX_RETENTION_DAYS
 from appsflyer_pipeline.config import get_settings
 from appsflyer_pipeline.loader import ConnectionStatus, PipelineError
 from appsflyer_pipeline.pipeline import _iter_work_items, run_backfill, run_daily
+from appsflyer_pipeline.reports import ReportSpec
 
 SAMPLE_CSV = (
     "Attributed Touch Time,Install Time,Event Time,Event Name,Event Value,Event Revenue,"
@@ -108,18 +109,18 @@ def load_spy(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 
     def _fake_load_events(
         engine: object,
+        spec: ReportSpec,
         table_name: str,
         rows: list[dict[str, Any]],
         *,
         app_id: str,
-        attribution_type: str,
         start_date: datetime.date,
         end_date: datetime.date,
     ) -> int:
         calls.append(
             {
                 "app_id": app_id,
-                "attribution_type": attribution_type,
+                "attribution_type": spec.attribution_type,
                 "start_date": start_date,
                 "end_date": end_date,
                 "rows": rows,
@@ -138,10 +139,12 @@ def test_iter_work_items_yields_expected_matrix(monkeypatch: pytest.MonkeyPatch)
     end = datetime.date(2026, 3, 31)  # 89 days -> 3 chunks of <=31 days each
     items = list(_iter_work_items(settings, start, end))
 
-    assert {i[0] for i in items} == set(APP_IDS)
-    assert {i[1] for i in items} == set(ATTRIBUTION_TYPES)
+    assert {app_id for _, app_id, _, _ in items} == set(APP_IDS)
+    assert {spec.attribution_type for spec, _, _, _ in items} == set(ATTRIBUTION_TYPES)
 
-    one_series = [(s, e) for a, t, s, e in items if a == "app1" and t == "non_organic"]
+    one_series = [
+        (s, e) for spec, a, s, e in items if a == "app1" and spec.attribution_type == "non_organic"
+    ]
     assert one_series[0][0] == start
     assert one_series[-1][1] == end
     assert all((e - s).days < 31 for s, e in one_series)
@@ -158,7 +161,9 @@ def test_iter_work_items_respects_configured_chunk_days(
 
     items = list(_iter_work_items(settings, start, end))
 
-    one_series = [(s, e) for a, t, s, e in items if a == "app1" and t == "non_organic"]
+    one_series = [
+        (s, e) for spec, a, s, e in items if a == "app1" and spec.attribution_type == "non_organic"
+    ]
     assert all((e - s).days < 10 for s, e in one_series)
     assert len(one_series) == 4
 

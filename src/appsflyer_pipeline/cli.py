@@ -19,6 +19,7 @@ from appsflyer_pipeline.config import Settings, get_settings
 from appsflyer_pipeline.loader import PipelineError, check_connection, create_engine, create_table
 from appsflyer_pipeline.logging_config import configure_logging
 from appsflyer_pipeline.pipeline import RunSummary, run_backfill, run_daily
+from appsflyer_pipeline.reports import REPORTS
 
 app = typer.Typer(
     name="appsflyer-pipeline",
@@ -46,34 +47,44 @@ def version() -> None:
 
 @app.command(name="check-connection")
 def check_connection_command() -> None:
-    """Verify connectivity to the analytics MariaDB and report the target table's status."""
+    """Verify connectivity to the analytics MariaDB and report every active
+    report's target table status (BAF-11 stage 3: today that's exactly one
+    table, appsflyer_events_fb, shared by both registered ReportSpecs).
+    """
     settings = _get_settings_or_exit()
     engine = create_engine(settings)
+    tables = sorted({spec.table(settings) for spec in REPORTS.values()})
     try:
-        status = check_connection(engine, settings.db_table)
+        statuses = [(table, check_connection(engine, table)) for table in tables]
     except PipelineError as exc:
         typer.echo(f"FAILED: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
-    typer.echo(f"Connected. MariaDB server version: {status.server_version}")
-    if status.table_exists:
-        typer.echo(f"Table `{settings.db_table}` exists ({status.row_count} rows).")
-    else:
-        typer.echo(f"Table `{settings.db_table}` does not exist yet (run `create-table`).")
+    typer.echo(f"Connected. MariaDB server version: {statuses[0][1].server_version}")
+    for table, status in statuses:
+        if status.table_exists:
+            typer.echo(f"Table `{table}` exists ({status.row_count} rows).")
+        else:
+            typer.echo(f"Table `{table}` does not exist yet (run `create-table`).")
 
 
 @app.command(name="create-table")
 def create_table_command() -> None:
-    """Create the target table if it doesn't already exist (idempotent)."""
+    """Create every active report's target table if it doesn't already exist
+    (idempotent). BAF-11 stage 3: today that's exactly one table.
+    """
     settings = _get_settings_or_exit()
     engine = create_engine(settings)
+    tables = sorted({spec.table(settings) for spec in REPORTS.values()})
     try:
-        create_table(engine, settings.db_table)
+        for table in tables:
+            create_table(engine, table)
     except PipelineError as exc:
         typer.echo(f"FAILED: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
-    typer.echo(f"Table `{settings.db_table}` is ready.")
+    for table in tables:
+        typer.echo(f"Table `{table}` is ready.")
 
 
 def _parse_optional_date(value: str | None, flag_name: str) -> datetime.date | None:

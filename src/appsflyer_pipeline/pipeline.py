@@ -29,7 +29,6 @@ import httpx
 from sqlalchemy.engine import Engine
 
 from appsflyer_pipeline.appsflyer_client import (
-    MAX_RETENTION_DAYS,
     AppsFlyerAPIError,
     AttributionType,
     chunk_date_range,
@@ -37,16 +36,27 @@ from appsflyer_pipeline.appsflyer_client import (
 )
 from appsflyer_pipeline.config import Settings, get_settings
 from appsflyer_pipeline.loader import PipelineError, check_connection, create_engine, load_events
+from appsflyer_pipeline.reports import REPORTS, ReportSpec
 from appsflyer_pipeline.transform import TransformError, transform_events
 
 logger = logging.getLogger(__name__)
-
-ATTRIBUTION_TYPES: tuple[AttributionType, ...] = ("non_organic", "retargeting")
 
 
 def _today() -> datetime.date:
     """Seam for tests: monkeypatch this rather than datetime.date.today directly."""
     return datetime.date.today()
+
+
+def _active_retention_days() -> int:
+    """Retention floor shared by this run's default window and warnings.
+
+    Every REPORTS entry shares the in-app-events 90-day retention today; this
+    takes the minimum across REPORTS so a single run-level window can't
+    silently outrun the narrowest report's real data availability once a
+    shorter-retention report (installs, 60 days, BAF-11 stage 5/6) is
+    registered.
+    """
+    return min(spec.retention_days for spec in REPORTS.values())
 
 
 @dataclass(frozen=True)
@@ -92,18 +102,21 @@ class RunSummary:
 
 def _iter_work_items(
     settings: Settings, start: datetime.date, end: datetime.date
-) -> Iterator[tuple[str, AttributionType, datetime.date, datetime.date]]:
-    """(app_id x attribution_type x <=31-day chunk) for the [start, end] window.
+) -> Iterator[tuple[ReportSpec, str, datetime.date, datetime.date]]:
+    """(report x app_id x <=chunk_days chunk) for the [start, end] window.
 
     Pure -- no HTTP/DB -- so the exact work-item set and chunk boundaries are
-    unit-testable without mocking anything.
+    unit-testable without mocking anything. Loop order (app_id outer, report
+    inner) is unchanged from the pre-ReportSpec app_id/attribution_type
+    nesting -- see this plan's Architecture decision 4 for why it wasn't
+    reordered to match the master spec's "report x app_id" prose.
     """
     for app_id in settings.appsflyer_app_ids:
-        for attribution_type in ATTRIBUTION_TYPES:
+        for spec in REPORTS.values():
             for chunk_start, chunk_end in chunk_date_range(
                 start, end, max_days=settings.appsflyer_chunk_days
             ):
-                yield app_id, attribution_type, chunk_start, chunk_end
+                yield spec, app_id, chunk_start, chunk_end
 
 
 def _process_window(
@@ -111,8 +124,8 @@ def _process_window(
     engine: Engine,
     settings: Settings,
     *,
+    spec: ReportSpec,
     app_id: str,
-    attribution_type: AttributionType,
     start_date: datetime.date,
     end_date: datetime.date,
     dry_run: bool,
@@ -124,6 +137,7 @@ def _process_window(
     Deliberately does NOT catch bare Exception: an unexpected bug must crash
     loudly, not get silently absorbed into a result row.
     """
+    attribution_type = spec.attribution_type
     logger.info(
         "fetching app_id=%s attribution_type=%s window=[%s, %s]",
         app_id,
@@ -135,7 +149,7 @@ def _process_window(
         raw_df = fetch_events(
             client,
             app_id=app_id,
-            attribution_type=attribution_type,
+            spec=spec,
             from_date=start_date,
             to_date=end_date,
             api_token=settings.appsflyer_api_token,
@@ -147,7 +161,7 @@ def _process_window(
 
         rows: list[dict[str, Any]] = transform_events(
             raw_df,
-            attribution_type=attribution_type,
+            spec=spec,
             app_id=app_id,
             media_source_filter=settings.appsflyer_media_source,
             event_names_filter=settings.appsflyer_event_names,
@@ -158,10 +172,10 @@ def _process_window(
         else:
             loaded_rows = load_events(
                 engine,
-                settings.db_table,
+                spec,
+                spec.table(settings),
                 rows,
                 app_id=app_id,
-                attribution_type=attribution_type,
                 start_date=start_date,
                 end_date=end_date,
             )
@@ -203,15 +217,19 @@ def _process_window(
     )
 
 
-def _warn_if_before_retention_floor(day: datetime.date, what: str) -> None:
+def _warn_if_before_retention_floor(day: datetime.date, what: str, *, retention_days: int) -> None:
     """Issue #28: the floor anchors to TODAY (the API retains a trailing
     window), never to a caller-provided end date -- an explicit past
     --end-date used to skip this warning for fully-beyond-retention windows.
     Warn-and-proceed is deliberate (RUNBOOK §9's probes rely on it). This is
     the API's documented/HTTP-400 boundary; the *silent* empty-response
     boundary is shorter -- see issue #45.
+
+    `retention_days` is per-run (BAF-11 stage 3), resolved by the caller via
+    `_active_retention_days()` -- not a module-level constant, since a future
+    report can carry a shorter retention than in-app-events' 90 days.
     """
-    retention_floor = _today() - datetime.timedelta(days=MAX_RETENTION_DAYS)
+    retention_floor = _today() - datetime.timedelta(days=retention_days)
     if day < retention_floor:
         logger.warning(
             "Requested %s %s is earlier than the AppsFlyer Pull API's ~%d-day "
@@ -219,7 +237,7 @@ def _warn_if_before_retention_floor(day: datetime.date, what: str) -> None:
             "data or an error. Proceeding anyway.",
             what,
             day,
-            MAX_RETENTION_DAYS,
+            retention_days,
             retention_floor,
         )
 
@@ -255,25 +273,24 @@ def _run_window(start: datetime.date, end: datetime.date, *, dry_run: bool) -> R
     _log_filter_mode(settings)
 
     if not dry_run:
-        status = check_connection(engine, settings.db_table)
-        if not status.table_exists:
-            raise PipelineError(
-                f"Target table `{settings.db_table}` does not exist yet — "
-                "run `appsflyer-pipeline create-table` first."
-            )
+        for table in sorted({spec.table(settings) for spec in REPORTS.values()}):
+            status = check_connection(engine, table)
+            if not status.table_exists:
+                raise PipelineError(
+                    f"Target table `{table}` does not exist yet — "
+                    "run `appsflyer-pipeline create-table` first."
+                )
 
     results: list[WindowResult] = []
     with httpx.Client() as client:
-        for app_id, attribution_type, chunk_start, chunk_end in _iter_work_items(
-            settings, start, end
-        ):
+        for spec, app_id, chunk_start, chunk_end in _iter_work_items(settings, start, end):
             results.append(
                 _process_window(
                     client,
                     engine,
                     settings,
+                    spec=spec,
                     app_id=app_id,
-                    attribution_type=attribution_type,
                     start_date=chunk_start,
                     end_date=chunk_end,
                     dry_run=dry_run,
@@ -289,20 +306,23 @@ def run_backfill(
     dry_run: bool = False,
 ) -> RunSummary:
     """Historical backfill. Defaults to the full available AppsFlyer window:
-    [yesterday - (MAX_RETENTION_DAYS - 1), yesterday].
+    [yesterday - (_active_retention_days() - 1), yesterday].
 
     If an explicit `start` predates the retention floor (today minus
-    MAX_RETENTION_DAYS), this does NOT clamp it — it logs a warning and
-    proceeds, so an operator can deliberately probe what AppsFlyer actually
-    returns for old dates (see RUNBOOK §9 and issue #45).
+    _active_retention_days(), the narrowest registered report's retention —
+    both registered specs currently agree at 90 days), this does NOT clamp
+    it — it logs a warning and proceeds, so an operator can deliberately
+    probe what AppsFlyer actually returns for old dates (see RUNBOOK §9 and
+    issue #45).
     """
+    retention_days = _active_retention_days()
     end = end or (_today() - datetime.timedelta(days=1))
-    default_start = end - datetime.timedelta(days=MAX_RETENTION_DAYS - 1)
+    default_start = end - datetime.timedelta(days=retention_days - 1)
     start = start or default_start
 
     if start > end:
         raise PipelineError(f"start {start} is after end {end}")
-    _warn_if_before_retention_floor(start, "backfill start")
+    _warn_if_before_retention_floor(start, "backfill start", retention_days=retention_days)
 
     return _run_window(start, end, dry_run=dry_run)
 
@@ -323,8 +343,9 @@ def run_daily(*, date: datetime.date | None = None, dry_run: bool = False) -> Ru
     straight onto the API's event-time from/to params, like the reference
     script's from_date/to_date arguments, with TO defaulting to yesterday.
     """
+    retention_days = _active_retention_days()
     if date is not None:
-        _warn_if_before_retention_floor(date, "daily --date")
+        _warn_if_before_retention_floor(date, "daily --date", retention_days=retention_days)
         return _run_window(date, date, dry_run=dry_run)
 
     settings = get_settings()
@@ -333,7 +354,9 @@ def run_daily(*, date: datetime.date | None = None, dry_run: bool = False) -> Ru
         end = settings.appsflyer_event_time_to or (_today() - datetime.timedelta(days=1))
         if start > end:
             raise PipelineError(f"APPSFLYER_EVENT_TIME_FROM {start} is after the window end {end}")
-        _warn_if_before_retention_floor(start, "APPSFLYER_EVENT_TIME_FROM")
+        _warn_if_before_retention_floor(
+            start, "APPSFLYER_EVENT_TIME_FROM", retention_days=retention_days
+        )
         return _run_window(start, end, dry_run=dry_run)
 
     end = _today() - datetime.timedelta(days=1)

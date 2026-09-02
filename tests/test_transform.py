@@ -9,7 +9,13 @@ import polars as pl
 import pytest
 
 from appsflyer_pipeline.appsflyer_client import AttributionType
+from appsflyer_pipeline.reports import REPORTS
 from appsflyer_pipeline.transform import TransformError, transform_events
+
+_SPEC_BY_ATTRIBUTION = {
+    "non_organic": REPORTS["in_app_events_non_organic"],
+    "retargeting": REPORTS["in_app_events_retargeting"],
+}
 
 RAW_COLUMNS = [
     "Attributed Touch Type",
@@ -68,7 +74,7 @@ def test_transform_maps_columns_and_adds_attribution_app_id() -> None:
     df = _df([_raw_row()])
     rows = transform_events(
         df,
-        attribution_type="non_organic",
+        spec=REPORTS["in_app_events_non_organic"],
         app_id="id1458505230",
         media_source_filter="Facebook Ads",
         event_names_filter=["af_purchase", "af_purchase_YC"],
@@ -113,7 +119,7 @@ def test_transform_preserves_appsflyer_times_verbatim() -> None:
     df = _df([_raw_row(**raw_times), _raw_row(**edge_times)])
     rows = transform_events(
         df,
-        attribution_type="non_organic",
+        spec=REPORTS["in_app_events_non_organic"],
         app_id="id1458505230",
         media_source_filter="Facebook Ads",
         event_names_filter=["af_purchase", "af_purchase_YC"],
@@ -135,7 +141,7 @@ def test_transform_filters_out_non_matching_media_source() -> None:
     df = _df([_raw_row(**{"Media Source": "Google Ads"})])
     rows = transform_events(
         df,
-        attribution_type="non_organic",
+        spec=REPORTS["in_app_events_non_organic"],
         app_id="id1458505230",
         media_source_filter="Facebook Ads",
         event_names_filter=["af_purchase", "af_purchase_YC"],
@@ -158,7 +164,7 @@ def test_transform_keeps_every_media_source_when_filter_unset() -> None:
     )
     rows = transform_events(
         df,
-        attribution_type="non_organic",
+        spec=REPORTS["in_app_events_non_organic"],
         app_id="id1458505230",
         media_source_filter=None,
         event_names_filter=["af_purchase", "af_purchase_YC"],
@@ -176,7 +182,7 @@ def test_transform_keeps_every_event_name_when_filter_unset() -> None:
     )
     rows = transform_events(
         df,
-        attribution_type="non_organic",
+        spec=REPORTS["in_app_events_non_organic"],
         app_id="id1458505230",
         media_source_filter="Facebook Ads",
         event_names_filter=None,
@@ -188,7 +194,7 @@ def test_transform_filters_out_non_matching_event_name() -> None:
     df = _df([_raw_row(**{"Event Name": "af_login"})])
     rows = transform_events(
         df,
-        attribution_type="non_organic",
+        spec=REPORTS["in_app_events_non_organic"],
         app_id="id1458505230",
         media_source_filter="Facebook Ads",
         event_names_filter=["af_purchase", "af_purchase_YC"],
@@ -211,7 +217,7 @@ def test_transform_handles_blank_optional_fields_as_none() -> None:
     )
     rows = transform_events(
         df,
-        attribution_type="retargeting",
+        spec=REPORTS["in_app_events_retargeting"],
         app_id="com.yesimmobile",
         media_source_filter="Facebook Ads",
         event_names_filter=["af_purchase", "af_purchase_YC"],
@@ -227,7 +233,7 @@ def test_transform_raises_on_missing_required_raw_column() -> None:
     with pytest.raises(TransformError, match="missing expected column"):
         transform_events(
             df,
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             app_id="id1458505230",
             media_source_filter="Facebook Ads",
             event_names_filter=["af_purchase"],
@@ -247,7 +253,7 @@ def test_transform_skips_rows_missing_a_required_field(
     with caplog.at_level(logging.WARNING, logger="appsflyer_pipeline.transform"):
         rows = transform_events(
             df,
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             app_id="id1458505230",
             media_source_filter="Facebook Ads",
             event_names_filter=["af_purchase", "af_purchase_YC"],
@@ -264,7 +270,7 @@ def test_transform_raises_on_unparseable_revenue() -> None:
     with pytest.raises(TransformError, match="event_revenue"):
         transform_events(
             df,
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             app_id="id1458505230",
             media_source_filter="Facebook Ads",
             event_names_filter=["af_purchase"],
@@ -276,7 +282,7 @@ def test_transform_raises_on_unparseable_timestamp() -> None:
     with pytest.raises(TransformError, match="timestamp"):
         transform_events(
             df,
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             app_id="id1458505230",
             media_source_filter="Facebook Ads",
             event_names_filter=["af_purchase"],
@@ -297,7 +303,7 @@ def test_transform_keeps_non_primary_rows() -> None:
     )
     rows = transform_events(
         df,
-        attribution_type="non_organic",
+        spec=REPORTS["in_app_events_non_organic"],
         app_id="id1458505230",
         media_source_filter="Facebook Ads",
         event_names_filter=["af_purchase", "af_purchase_YC"],
@@ -314,7 +320,7 @@ def test_transform_never_requires_the_flag_column(attribution_type: AttributionT
     df = _df([_raw_row()]).drop("Is Primary Attribution")
     rows = transform_events(
         df,
-        attribution_type=attribution_type,
+        spec=_SPEC_BY_ATTRIBUTION[attribution_type],
         app_id="id1458505230",
         media_source_filter="Facebook Ads",
         event_names_filter=["af_purchase"],
@@ -326,7 +332,7 @@ def test_transform_empty_dataframe_returns_empty_list() -> None:
     df = _df([])
     rows = transform_events(
         df,
-        attribution_type="non_organic",
+        spec=REPORTS["in_app_events_non_organic"],
         app_id="id1458505230",
         media_source_filter="Facebook Ads",
         event_names_filter=["af_purchase"],
@@ -389,7 +395,7 @@ def test_transform_headers_only_response_returns_empty(
     assert df.columns[0] == "Attributed Touch Type"  # BOM stripped, not '﻿Attributed...'
     rows = transform_events(
         df,
-        attribution_type=attribution_type,
+        spec=_SPEC_BY_ATTRIBUTION[attribution_type],
         app_id="id1458505230",
         media_source_filter="Facebook Ads",
         event_names_filter=["af_purchase"],
@@ -428,7 +434,7 @@ def test_transform_raises_on_zero_row_frame_with_missing_columns(
     with pytest.raises(TransformError, match="missing expected column"):
         transform_events(
             df,
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             app_id="id1458505230",
             media_source_filter="Facebook Ads",
             event_names_filter=["af_purchase"],
@@ -446,7 +452,7 @@ def test_transform_collapses_exact_duplicate_rows(
     with caplog.at_level(logging.WARNING, logger="appsflyer_pipeline.transform"):
         rows = transform_events(
             df,
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             app_id="id1458505230",
             media_source_filter="Facebook Ads",
             event_names_filter=["af_purchase", "af_purchase_YC"],
@@ -478,7 +484,7 @@ def test_transform_keeps_only_the_latest_install_time_on_conflict(
     with caplog.at_level(logging.WARNING, logger="appsflyer_pipeline.transform"):
         rows = transform_events(
             df,
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             app_id="id1458505230",
             media_source_filter="Facebook Ads",
             event_names_filter=["af_purchase", "af_purchase_YC"],
@@ -509,7 +515,7 @@ def test_transform_keeps_both_rows_when_event_value_differs(
     with caplog.at_level(logging.WARNING, logger="appsflyer_pipeline.transform"):
         rows = transform_events(
             df,
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             app_id="id1458505230",
             media_source_filter="Facebook Ads",
             event_names_filter=["af_purchase", "af_purchase_YC"],
@@ -535,7 +541,7 @@ def test_transform_later_install_time_wins_from_either_report_position(
     with caplog.at_level(logging.WARNING, logger="appsflyer_pipeline.transform"):
         rows = transform_events(
             df,
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             app_id="id1458505230",
             media_source_filter="Facebook Ads",
             event_names_filter=["af_purchase", "af_purchase_YC"],
@@ -557,7 +563,7 @@ def test_transform_null_install_time_loses_to_a_real_one() -> None:
     )
     rows = transform_events(
         df,
-        attribution_type="non_organic",
+        spec=REPORTS["in_app_events_non_organic"],
         app_id="id1458505230",
         media_source_filter="Facebook Ads",
         event_names_filter=["af_purchase", "af_purchase_YC"],
@@ -584,7 +590,7 @@ def test_transform_warns_when_install_time_cannot_break_the_tie(
     with caplog.at_level(logging.WARNING, logger="appsflyer_pipeline.transform"):
         rows = transform_events(
             df,
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             app_id="id1458505230",
             media_source_filter="Facebook Ads",
             event_names_filter=["af_purchase", "af_purchase_YC"],
@@ -614,7 +620,7 @@ def test_transform_counts_every_conflict_but_names_only_the_first(
     with caplog.at_level(logging.WARNING, logger="appsflyer_pipeline.transform"):
         rows = transform_events(
             df,
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             app_id="id1458505230",
             media_source_filter="Facebook Ads",
             event_names_filter=["af_purchase", "af_purchase_YC"],
@@ -644,7 +650,7 @@ def test_transform_reports_conflicts_and_exact_duplicates_separately(
     with caplog.at_level(logging.WARNING, logger="appsflyer_pipeline.transform"):
         rows = transform_events(
             df,
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             app_id="id1458505230",
             media_source_filter="Facebook Ads",
             event_names_filter=["af_purchase", "af_purchase_YC"],
@@ -671,7 +677,7 @@ def test_transform_conflict_with_null_revenue_does_not_break_the_sum(
     with caplog.at_level(logging.WARNING, logger="appsflyer_pipeline.transform"):
         rows = transform_events(
             df,
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             app_id="id1458505230",
             media_source_filter="Facebook Ads",
             event_names_filter=["af_purchase", "af_purchase_YC"],

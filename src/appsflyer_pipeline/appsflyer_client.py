@@ -13,7 +13,7 @@ from __future__ import annotations
 import datetime
 import logging
 from io import BytesIO
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import httpx
 import polars as pl
@@ -21,10 +21,8 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 
 AttributionType = Literal["non_organic", "retargeting"]
 
-_ENDPOINT_BY_ATTRIBUTION: dict[AttributionType, str] = {
-    "non_organic": "in_app_events_report",
-    "retargeting": "in-app-events-retarget",
-}
+if TYPE_CHECKING:
+    from appsflyer_pipeline.reports import ReportSpec
 
 _BASE_URL = "https://hq1.appsflyer.com/api/raw-data/export/app"
 _REQUEST_TIMEOUT = 120.0
@@ -66,7 +64,7 @@ def _fetch_csv(
     client: httpx.Client,
     *,
     app_id: str,
-    attribution_type: AttributionType,
+    spec: ReportSpec,
     from_date: datetime.date,
     to_date: datetime.date,
     api_token: str,
@@ -75,8 +73,7 @@ def _fetch_csv(
     timezone: str | None = None,
     maximum_rows: int = DEFAULT_MAXIMUM_ROWS,
 ) -> bytes:
-    endpoint = _ENDPOINT_BY_ATTRIBUTION[attribution_type]
-    url = f"{_BASE_URL}/{app_id}/{endpoint}/v5"
+    url = f"{_BASE_URL}/{app_id}/{spec.endpoint}/v5"
     params: dict[str, str | int] = {
         "from": from_date.isoformat(),
         "to": to_date.isoformat(),
@@ -87,14 +84,18 @@ def _fetch_csv(
     # matching nothing, and AppsFlyer answers that with a valid header-only
     # report — indistinguishable downstream from a genuinely quiet window, so
     # the idempotent delete-then-insert would wipe it (issue #45's shape).
-    if event_names is not None:
+    if spec.sends_event_name and event_names is not None:
         params["event_name"] = ",".join(event_names)
-    if media_source is not None:
+    if spec.sends_media_source and media_source is not None:
         params["media_source"] = media_source
     if timezone is not None:
         # Issue #53: without this param AppsFlyer reports in UTC; with it, event
         # times and the from/to day boundaries follow the app's configured zone.
         params["timezone"] = timezone
+    # BAF-11 stage 3: both registered specs have additional_fields=(), so this
+    # is dead for now -- installs (stage 5/6) is the first spec to set it.
+    if spec.additional_fields:
+        params["additional_fields"] = ",".join(spec.additional_fields)
     headers = {
         "Authorization": f"Bearer {api_token}",
         "Accept": "text/csv",
@@ -113,7 +114,7 @@ def _fetch_and_parse(
     client: httpx.Client,
     *,
     app_id: str,
-    attribution_type: AttributionType,
+    spec: ReportSpec,
     from_date: datetime.date,
     to_date: datetime.date,
     api_token: str,
@@ -131,7 +132,7 @@ def _fetch_and_parse(
         content = _fetch_csv(
             client,
             app_id=app_id,
-            attribution_type=attribution_type,
+            spec=spec,
             from_date=from_date,
             to_date=to_date,
             api_token=api_token,
@@ -142,12 +143,12 @@ def _fetch_and_parse(
         )
     except httpx.HTTPStatusError as exc:
         raise AppsFlyerAPIError(
-            f"AppsFlyer API [{attribution_type}] for {app_id} ({from_date} to {to_date}) "
+            f"AppsFlyer API [{spec.attribution_type}] for {app_id} ({from_date} to {to_date}) "
             f"failed: HTTP {exc.response.status_code}: {exc.response.text[:200]}"
         ) from exc
     except httpx.TransportError as exc:
         raise AppsFlyerAPIError(
-            f"Network failure calling AppsFlyer API [{attribution_type}] for {app_id}: {exc}"
+            f"Network failure calling AppsFlyer API [{spec.attribution_type}] for {app_id}: {exc}"
         ) from exc
 
     if not content.strip():
@@ -157,7 +158,7 @@ def _fetch_and_parse(
         # fails only this window and preserves its previously loaded rows,
         # instead of flowing into load_events' delete-then-insert-nothing.
         raise AppsFlyerAPIError(
-            f"AppsFlyer returned an empty response body [{attribution_type}] for {app_id} "
+            f"AppsFlyer returned an empty response body [{spec.attribution_type}] for {app_id} "
             f"({from_date} to {to_date}) — a legitimate empty report always includes CSV headers"
         )
     # infer_schema_length=0 forces every column to Utf8: chunks are read
@@ -168,7 +169,7 @@ def _fetch_and_parse(
         return pl.read_csv(BytesIO(content), infer_schema_length=0)
     except (pl.exceptions.ComputeError, pl.exceptions.NoDataError) as exc:
         raise AppsFlyerAPIError(
-            f"AppsFlyer returned an unparseable CSV [{attribution_type}] for {app_id} "
+            f"AppsFlyer returned an unparseable CSV [{spec.attribution_type}] for {app_id} "
             f"({from_date} to {to_date}): {exc}"
         ) from exc
 
@@ -177,7 +178,7 @@ def fetch_events(
     client: httpx.Client,
     *,
     app_id: str,
-    attribution_type: AttributionType,
+    spec: ReportSpec,
     from_date: datetime.date,
     to_date: datetime.date,
     api_token: str,
@@ -213,7 +214,7 @@ def fetch_events(
     df = _fetch_and_parse(
         client,
         app_id=app_id,
-        attribution_type=attribution_type,
+        spec=spec,
         from_date=from_date,
         to_date=to_date,
         api_token=api_token,
@@ -227,7 +228,7 @@ def fetch_events(
 
     if from_date == to_date:
         raise AppsFlyerAPIError(
-            f"Report for {app_id} [{attribution_type}] {from_date}..{to_date} hit the "
+            f"Report for {app_id} [{spec.attribution_type}] {from_date}..{to_date} hit the "
             f"{maximum_rows}-row cap on a single day — data is likely truncated and the "
             f"window cannot be split any further."
         )
@@ -237,7 +238,7 @@ def fetch_events(
         "AppsFlyer response for %s [%s] %s..%s hit the %d-row cap -- splitting into "
         "%s..%s and %s..%s (extra report-download quota spent)",
         app_id,
-        attribution_type,
+        spec.attribution_type,
         from_date,
         to_date,
         maximum_rows,
@@ -249,7 +250,7 @@ def fetch_events(
     first_half = fetch_events(
         client,
         app_id=app_id,
-        attribution_type=attribution_type,
+        spec=spec,
         from_date=from_date,
         to_date=mid,
         api_token=api_token,
@@ -261,7 +262,7 @@ def fetch_events(
     second_half = fetch_events(
         client,
         app_id=app_id,
-        attribution_type=attribution_type,
+        spec=spec,
         from_date=mid + datetime.timedelta(days=1),
         to_date=to_date,
         api_token=api_token,
@@ -274,7 +275,7 @@ def fetch_events(
         return pl.concat([first_half, second_half])
     except pl.exceptions.PolarsError as exc:
         raise AppsFlyerAPIError(
-            f"Could not combine split halves [{attribution_type}] for {app_id} "
+            f"Could not combine split halves [{spec.attribution_type}] for {app_id} "
             f"({from_date} to {to_date}): {exc}"
         ) from exc
 

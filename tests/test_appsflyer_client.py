@@ -12,12 +12,12 @@ from tenacity import wait_none
 from appsflyer_pipeline import appsflyer_client
 from appsflyer_pipeline.appsflyer_client import (
     AppsFlyerAPIError,
-    AttributionType,
     _fetch_csv,
     _is_retryable,
     chunk_date_range,
     fetch_events,
 )
+from appsflyer_pipeline.reports import REPORTS
 
 SAMPLE_CSV = (
     "Attributed Touch Time,Install Time,Event Time,Event Name,Event Revenue,"
@@ -43,7 +43,7 @@ def test_fetch_events_parses_csv() -> None:
         df = fetch_events(
             client,
             app_id="id123",
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             from_date=datetime.date(2026, 5, 20),
             to_date=datetime.date(2026, 5, 20),
             api_token="token",
@@ -73,7 +73,7 @@ def test_fetch_events_follows_redirect_to_rawdata_domain() -> None:
         df = fetch_events(
             client,
             app_id="id123",
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             from_date=datetime.date(2026, 5, 20),
             to_date=datetime.date(2026, 5, 20),
             api_token="token",
@@ -92,7 +92,7 @@ def test_fetch_events_sends_expected_params_and_headers() -> None:
         fetch_events(
             client,
             app_id="id123",
-            attribution_type="retargeting",
+            spec=REPORTS["in_app_events_retargeting"],
             from_date=datetime.date(2026, 5, 1),
             to_date=datetime.date(2026, 5, 20),
             api_token="secret-token",
@@ -121,7 +121,7 @@ def test_fetch_events_sends_maximum_rows_by_default() -> None:
         fetch_events(
             client,
             app_id="id123",
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             from_date=datetime.date(2026, 5, 20),
             to_date=datetime.date(2026, 5, 20),
             api_token="token",
@@ -146,7 +146,7 @@ def test_fetch_events_omits_filter_params_when_unset() -> None:
         fetch_events(
             client,
             app_id="id123",
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             from_date=datetime.date(2026, 5, 1),
             to_date=datetime.date(2026, 5, 20),
             api_token="secret-token",
@@ -175,7 +175,7 @@ def test_fetch_events_sends_timezone_param_when_configured() -> None:
         fetch_events(
             client,
             app_id="id123",
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             from_date=datetime.date(2026, 7, 9),
             to_date=datetime.date(2026, 7, 9),
             api_token="token",
@@ -200,13 +200,12 @@ def test_fetch_events_never_sends_additional_fields() -> None:
     rt_route = respx.get(_url("id123", "retargeting")).mock(
         return_value=httpx.Response(200, text=SAMPLE_CSV)
     )
-    attribution_types: tuple[AttributionType, ...] = ("non_organic", "retargeting")
     with httpx.Client() as client:
-        for attribution_type in attribution_types:
+        for spec in REPORTS.values():
             fetch_events(
                 client,
                 app_id="id123",
-                attribution_type=attribution_type,
+                spec=spec,
                 from_date=datetime.date(2026, 5, 20),
                 to_date=datetime.date(2026, 5, 20),
                 api_token="token",
@@ -231,7 +230,7 @@ def test_fetch_events_raises_on_empty_body(body: str) -> None:
         fetch_events(
             client,
             app_id="id123",
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             from_date=datetime.date(2026, 5, 20),
             to_date=datetime.date(2026, 5, 20),
             api_token="token",
@@ -254,7 +253,7 @@ def test_fetch_events_raises_on_bom_only_body() -> None:
         fetch_events(
             client,
             app_id="id123",
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             from_date=datetime.date(2026, 5, 20),
             to_date=datetime.date(2026, 5, 20),
             api_token="token",
@@ -272,7 +271,7 @@ def test_fetch_events_raises_on_client_error_without_retry() -> None:
         fetch_events(
             client,
             app_id="id123",
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             from_date=datetime.date(2026, 5, 20),
             to_date=datetime.date(2026, 5, 20),
             api_token="token",
@@ -296,7 +295,7 @@ def test_fetch_csv_retries_on_5xx_then_succeeds() -> None:
         content = fast_fetch(
             client,
             app_id="id123",
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             from_date=datetime.date(2026, 5, 20),
             to_date=datetime.date(2026, 5, 20),
             api_token="token",
@@ -325,7 +324,7 @@ def test_fetch_events_wraps_transport_error(monkeypatch: pytest.MonkeyPatch) -> 
         fetch_events(
             client,
             app_id="id123",
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             from_date=datetime.date(2026, 5, 20),
             to_date=datetime.date(2026, 5, 20),
             api_token="token",
@@ -388,7 +387,7 @@ def test_fetch_events_raises_on_malformed_csv() -> None:
         fetch_events(
             client,
             app_id="id123",
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             from_date=datetime.date(2026, 5, 20),
             to_date=datetime.date(2026, 5, 20),
             api_token="token",
@@ -417,7 +416,7 @@ def test_fetch_events_raises_on_1m_row_cap(monkeypatch: pytest.MonkeyPatch) -> N
         fetch_events(
             client,
             app_id="id123",
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             from_date=datetime.date(2026, 5, 20),
             to_date=datetime.date(2026, 5, 20),
             api_token="token",
@@ -454,7 +453,7 @@ def test_fetch_events_splits_window_when_response_hits_maximum_rows() -> None:
         df = fetch_events(
             client,
             app_id="id123",
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             from_date=datetime.date(2026, 5, 1),
             to_date=datetime.date(2026, 5, 20),
             api_token="token",
@@ -508,7 +507,7 @@ def test_fetch_events_wraps_concat_failure_as_appsflyer_error(
         fetch_events(
             client,
             app_id="id123",
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             from_date=datetime.date(2026, 5, 1),
             to_date=datetime.date(2026, 5, 20),
             api_token="token",
@@ -532,7 +531,7 @@ def test_fetch_events_logs_when_window_is_split(caplog: pytest.LogCaptureFixture
         fetch_events(
             client,
             app_id="id123",
-            attribution_type="non_organic",
+            spec=REPORTS["in_app_events_non_organic"],
             from_date=datetime.date(2026, 5, 1),
             to_date=datetime.date(2026, 5, 20),
             api_token="token",
