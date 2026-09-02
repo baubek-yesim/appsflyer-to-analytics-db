@@ -152,6 +152,12 @@ def load_spy(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
             {
                 "app_id": app_id,
                 "attribution_type": spec.attribution_type,
+                # BAF-11 stage 4: which report family and which physical table
+                # a load targeted are now distinguishable -- REPORTS holds two
+                # families writing two different tables, so "load_events was
+                # called" no longer says which one.
+                "report": spec.name,
+                "table_name": table_name,
                 "start_date": start_date,
                 "end_date": end_date,
                 "rows": rows,
@@ -902,6 +908,47 @@ def test_run_window_preflight_still_covers_an_enabled_installs_table(
 
     with pytest.raises(PipelineError, match=BASE_ENV["DB_TABLE_INSTALLS"]):
         run_daily(date=datetime.date(2026, 5, 20))
+
+
+def test_run_daily_loads_installs_rows_into_the_installs_table_end_to_end(
+    monkeypatch: pytest.MonkeyPatch, load_spy: list[dict[str, Any]]
+) -> None:
+    """The only test in the suite that drives a non-empty installs row all the
+    way from an AppsFlyer response through fetch -> transform -> load.
+
+    Everything else proves the 130-column write path at unit level only: the
+    DDL as a string, `transform_events` in isolation, `load_events`'s SQL in
+    isolation. This pins that the four pieces actually compose -- installs'
+    rows reach `load_events`, with installs' own table name and its
+    `install_time` window column, and are NOT silently emptied on the way.
+    """
+    _set_env(monkeypatch, APPSFLYER_ENABLED_REPORTS=ALL_REPORTS_ENABLED)
+    # Fixed, and recent relative to the fixture's 2026-05-19 timestamps, so
+    # installs' 60-day hard clamp (floor: 2026-04-02) is a no-op here.
+    monkeypatch.setattr(pipeline, "_today", lambda: datetime.date(2026, 6, 1))
+
+    with respx.mock:
+        _mock_all_ok()
+        summary = run_daily(date=datetime.date(2026, 5, 19))
+
+    assert summary.all_succeeded
+    installs_calls = [call for call in load_spy if call["report"] == "installs"]
+    assert len(installs_calls) == len(APP_IDS) * len(ATTRIBUTION_TYPES)
+    for call in installs_calls:
+        assert call["table_name"] == BASE_ENV["DB_TABLE_INSTALLS"]
+        assert len(call["rows"]) == 1  # non-empty: the row survived the whole path
+        row = call["rows"][0]
+        assert set(row) == set(REPORTS["installs_non_organic"].insert_columns)  # all 130
+        assert row["appsflyer_id"] == "af-installs-1"
+        assert row["install_time"] == datetime.datetime(2026, 5, 19, 9, 30, 0)
+        assert row["app_id"] == call["app_id"]
+        assert row["attribution_type"] == call["attribution_type"]
+
+    # in-app-events kept writing to its own, different table in the same run.
+    in_app_events_tables = {
+        call["table_name"] for call in load_spy if call["report"] == "in_app_events"
+    }
+    assert in_app_events_tables == {BASE_ENV["DB_TABLE"]}
 
 
 def test_installs_transform_is_not_re_filtered_by_the_event_name_filter(
