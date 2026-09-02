@@ -268,9 +268,16 @@ def _warn_if_before_retention_floor(day: datetime.date, what: str, *, retention_
     the API's documented/HTTP-400 boundary; the *silent* empty-response
     boundary is shorter -- see issue #45.
 
-    `retention_days` is per-run (BAF-11 stage 3), resolved by the caller via
-    `_active_retention_days()` -- not a module-level constant, since a future
-    report can carry a shorter retention than in-app-events' 90 days.
+    `retention_days` is a caller-supplied parameter, not a module-level
+    constant (BAF-11 stage 3) -- since BAF-11 stage 4, every call site passes
+    `MAX_RETENTION_DAYS` (in-app-events' own retention), not
+    `_active_retention_days()`'s cross-REPORTS minimum: this warning is about
+    the `hard_clamp_retention=False` specs' warn-and-proceed floor
+    specifically, and installs (`hard_clamp_retention=True`) never reaches
+    this function -- it clamps itself inside `_iter_work_items` instead. Kept
+    as a parameter (not hardcoded to `MAX_RETENTION_DAYS` directly) so a
+    future `hard_clamp_retention=False` report with a different retention can
+    still call this correctly.
     """
     retention_floor = _today() - datetime.timedelta(days=retention_days)
     if day < retention_floor:
