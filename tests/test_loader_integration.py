@@ -21,6 +21,7 @@ from sqlalchemy import text
 
 from appsflyer_pipeline.config import get_settings
 from appsflyer_pipeline.loader import check_connection, create_engine, create_table, load_events
+from appsflyer_pipeline.reports import REPORTS
 
 
 def test_check_connection_reports_server_version_and_table_status() -> None:
@@ -103,19 +104,19 @@ def test_load_events_is_idempotent_and_isolated() -> None:
     try:
         count1 = load_events(
             engine,
+            REPORTS["in_app_events_non_organic"],
             settings.db_table,
             [row],
             app_id=test_app_id,
-            attribution_type=test_attribution,
             start_date=window_start,
             end_date=window_end,
         )
         count2 = load_events(
             engine,
+            REPORTS["in_app_events_non_organic"],
             settings.db_table,
             [row],
             app_id=test_app_id,
-            attribution_type=test_attribution,
             start_date=window_start,
             end_date=window_end,
         )
@@ -135,10 +136,10 @@ def test_load_events_is_idempotent_and_isolated() -> None:
         # Delete-only call for the same window cleans up regardless of outcome.
         load_events(
             engine,
+            REPORTS["in_app_events_non_organic"],
             settings.db_table,
             [],
             app_id=test_app_id,
-            attribution_type=test_attribution,
             start_date=window_start,
             end_date=window_end,
         )
@@ -186,10 +187,10 @@ def test_load_events_logs_rowcounts_and_warns_on_wipe(
         with caplog.at_level(logging.INFO, logger="appsflyer_pipeline.loader"):
             load_events(
                 engine,
+                REPORTS["in_app_events_non_organic"],
                 settings.db_table,
                 [row],
                 app_id=test_app_id,
-                attribution_type=test_attribution,
                 start_date=window,
                 end_date=window,
             )
@@ -201,10 +202,10 @@ def test_load_events_logs_rowcounts_and_warns_on_wipe(
         with caplog.at_level(logging.INFO, logger="appsflyer_pipeline.loader"):
             load_events(
                 engine,
+                REPORTS["in_app_events_non_organic"],
                 settings.db_table,
                 [],
                 app_id=test_app_id,
-                attribution_type=test_attribution,
                 start_date=window,
                 end_date=window,
             )
@@ -222,10 +223,10 @@ def test_load_events_logs_rowcounts_and_warns_on_wipe(
         # Delete-only call for the same window cleans up regardless of outcome.
         load_events(
             engine,
+            REPORTS["in_app_events_non_organic"],
             settings.db_table,
             [],
             app_id=test_app_id,
-            attribution_type=test_attribution,
             start_date=window,
             end_date=window,
         )

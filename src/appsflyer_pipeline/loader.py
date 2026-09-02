@@ -17,6 +17,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from appsflyer_pipeline.config import Settings
+from appsflyer_pipeline.reports import ReportSpec
 
 logger = logging.getLogger(__name__)
 
@@ -135,35 +136,13 @@ def create_table(engine: Engine, table_name: str) -> None:
         raise PipelineError(f"Could not create table `{table_name}`: {exc}") from exc
 
 
-# Column order for INSERT — must match the keys transform.transform_events() produces.
-_INSERT_COLUMNS = (
-    "event_time",
-    "install_time",
-    "attributed_touch_time",
-    "event_name",
-    "event_revenue",
-    "media_source",
-    "channel",
-    "campaign",
-    "campaign_id",
-    "adset",
-    "adset_id",
-    "ad",
-    "ad_id",
-    "appsflyer_id",
-    "customer_user_id",
-    "attribution_type",
-    "app_id",
-)
-
-
 def load_events(
     engine: Engine,
+    spec: ReportSpec,
     table_name: str,
     rows: list[dict[str, Any]],
     *,
     app_id: str,
-    attribution_type: str,
     start_date: datetime.date,
     end_date: datetime.date,
 ) -> int:
@@ -174,16 +153,18 @@ def load_events(
     window (backfill chunk retries, daily re-runs) without duplicating data.
     """
     table_name = _validate_identifier(table_name)
+    window_column = _validate_identifier(spec.window_column)
+    attribution_type = spec.attribution_type
     window_start = datetime.datetime.combine(start_date, datetime.time.min)
     window_end = datetime.datetime.combine(end_date + datetime.timedelta(days=1), datetime.time.min)
 
     delete_stmt = text(
         f"DELETE FROM `{table_name}` "
         "WHERE app_id = :app_id AND attribution_type = :attribution_type "
-        "AND event_time >= :window_start AND event_time < :window_end"
+        f"AND `{window_column}` >= :window_start AND `{window_column}` < :window_end"
     )
-    columns_sql = ", ".join(f"`{c}`" for c in _INSERT_COLUMNS)
-    placeholders_sql = ", ".join(f":{c}" for c in _INSERT_COLUMNS)
+    columns_sql = ", ".join(f"`{c}`" for c in spec.insert_columns)
+    placeholders_sql = ", ".join(f":{c}" for c in spec.insert_columns)
     insert_stmt = text(f"INSERT INTO `{table_name}` ({columns_sql}) VALUES ({placeholders_sql})")
 
     try:

@@ -14,6 +14,7 @@ from appsflyer_pipeline.loader import (
     create_table,
     load_events,
 )
+from appsflyer_pipeline.reports import REPORTS
 
 
 @pytest.mark.parametrize("name", ["appsflyer_events_fb", "Table1", "a_b_c123"])
@@ -57,10 +58,10 @@ def test_load_events_wraps_sqlalchemy_error() -> None:
     with pytest.raises(PipelineError, match="Could not load events") as excinfo:
         load_events(
             engine,
+            REPORTS["in_app_events_non_organic"],
             "some_table",
             [],
             app_id="app1",
-            attribution_type="non_organic",
             start_date=datetime.date(2020, 1, 1),
             end_date=datetime.date(2020, 1, 1),
         )
