@@ -29,6 +29,7 @@ import httpx
 from sqlalchemy.engine import Engine
 
 from appsflyer_pipeline.appsflyer_client import (
+    MAX_RETENTION_DAYS,
     AppsFlyerAPIError,
     AttributionType,
     chunk_date_range,
@@ -48,13 +49,17 @@ def _today() -> datetime.date:
 
 
 def _active_retention_days() -> int:
-    """Retention floor shared by this run's default window and warnings.
+    """The narrowest retention_days across every registered REPORTS entry.
 
-    Every REPORTS entry shares the in-app-events 90-day retention today; this
-    takes the minimum across REPORTS so a single run-level window can't
-    silently outrun the narrowest report's real data availability once a
-    shorter-retention report (installs, 60 days, BAF-11 stage 5/6) is
-    registered.
+    BAF-11 stage 4: NOT consumed by run_backfill/run_daily's default-window or
+    warn-threshold math -- those use MAX_RETENTION_DAYS instead, since they're
+    about in-app-events' own (hard_clamp_retention=False) floor specifically,
+    and installs (hard_clamp_retention=True, 60 days) already clamps its own
+    effective start inside _iter_work_items regardless of what start/end this
+    function's callers would otherwise compute. Kept as a small, still-correct
+    diagnostic helper (min(...) over REPORTS, currently 60 now that installs
+    is registered) with no production call site -- not dead code to delete,
+    per this stage's plan.
     """
     return min(spec.retention_days for spec in REPORTS.values())
 
@@ -105,16 +110,54 @@ def _iter_work_items(
 ) -> Iterator[tuple[ReportSpec, str, datetime.date, datetime.date]]:
     """(report x app_id x <=chunk_days chunk) for the [start, end] window.
 
-    Pure -- no HTTP/DB -- so the exact work-item set and chunk boundaries are
-    unit-testable without mocking anything. Loop order (app_id outer, report
-    inner) is unchanged from the pre-ReportSpec app_id/attribution_type
-    nesting -- see this plan's Architecture decision 4 for why it wasn't
-    reordered to match the master spec's "report x app_id" prose.
+    Mostly pure -- the one exception (BAF-11 stage 4) is `spec.hard_clamp_retention`
+    specs, which read `_today()` to clamp their effective start date up to the
+    retention floor; monkeypatch `_today` for a deterministic test, same
+    pattern already used elsewhere in this module. Loop order (app_id outer,
+    report inner) is unchanged from the pre-ReportSpec app_id/attribution_type
+    nesting -- see the Stage 3 plan's Architecture decision 4 for why it
+    wasn't reordered to match the master spec's "report x app_id" prose.
     """
     for app_id in settings.appsflyer_app_ids:
         for spec in REPORTS.values():
+            spec_start = start
+            if spec.hard_clamp_retention:
+                # BAF-11 stage 4 (installs): a response past the real
+                # retention boundary can come back as a valid, header-only
+                # EMPTY report (issue #45's shape) -- the idempotent
+                # delete-then-insert would then wipe a window that may have
+                # had real data. In-app-events (hard_clamp_retention=False)
+                # deliberately keeps warn-and-proceed instead -- see this
+                # stage's plan, Architecture decision 3.
+                retention_floor = _today() - datetime.timedelta(days=spec.retention_days)
+                spec_start = max(start, retention_floor)
+                if spec_start > end:
+                    logger.warning(
+                        "skipping %s for app_id=%s: requested window [%s, %s] is entirely "
+                        "before the %d-day retention floor (%s) -- nothing to fetch",
+                        spec.name,
+                        app_id,
+                        start,
+                        end,
+                        spec.retention_days,
+                        retention_floor,
+                    )
+                    continue
+                if spec_start > start:
+                    logger.warning(
+                        "clamping %s for app_id=%s: requested start %s is before the "
+                        "%d-day retention floor -- fetching from %s instead (a response "
+                        "for dates before the floor can come back silently empty, and the "
+                        "idempotent delete-then-insert would wipe any already-loaded data "
+                        "there)",
+                        spec.name,
+                        app_id,
+                        start,
+                        spec.retention_days,
+                        spec_start,
+                    )
             for chunk_start, chunk_end in chunk_date_range(
-                start, end, max_days=settings.appsflyer_chunk_days
+                spec_start, end, max_days=settings.appsflyer_chunk_days
             ):
                 yield spec, app_id, chunk_start, chunk_end
 
@@ -306,23 +349,38 @@ def run_backfill(
     dry_run: bool = False,
 ) -> RunSummary:
     """Historical backfill. Defaults to the full available AppsFlyer window:
-    [yesterday - (_active_retention_days() - 1), yesterday].
+    [yesterday - (MAX_RETENTION_DAYS - 1), yesterday].
 
     If an explicit `start` predates the retention floor (today minus
-    _active_retention_days(), the narrowest registered report's retention —
-    both registered specs currently agree at 90 days), this does NOT clamp
-    it — it logs a warning and proceeds, so an operator can deliberately
-    probe what AppsFlyer actually returns for old dates (see RUNBOOK §9 and
-    issue #45).
+    MAX_RETENTION_DAYS, in-app-events' own retention — this run-level default/
+    warn threshold is about in-app-events specifically, not the cross-REPORTS
+    minimum; see the BAF-11 stage 4 comment below), this does NOT clamp it —
+    it logs a warning and proceeds, so an operator can deliberately probe what
+    AppsFlyer actually returns for old dates (see RUNBOOK §9 and issue #45).
+    installs (hard_clamp_retention=True) is unaffected by this: it clamps its
+    own effective start inside `_iter_work_items` regardless of this
+    function's `start`/`end`.
     """
-    retention_days = _active_retention_days()
+    # BAF-11 stage 4: do NOT use _active_retention_days() (the cross-REPORTS
+    # minimum) here. Once installs (retention_days=60, hard_clamp_retention=
+    # True) is registered, that minimum drops from 90 to 60 -- but installs
+    # already clamps its OWN effective start inside _iter_work_items
+    # regardless of what start this function resolves to (Architecture
+    # decision 3). Keying the run-level default/warn threshold off the global
+    # minimum would silently narrow in-app-events' no-args default window
+    # from 90 days to 60, contradicting this stage's regression bar
+    # (in-app-events' warn-only retention behavior stays byte-for-byte
+    # unchanged) -- caught by test_run_backfill_default_window_is_90_days.
+    # MAX_RETENTION_DAYS is what this caller-facing default/warn threshold is
+    # actually about: the widest retention among hard_clamp_retention=False
+    # specs (today, in-app-events only).
     end = end or (_today() - datetime.timedelta(days=1))
-    default_start = end - datetime.timedelta(days=retention_days - 1)
+    default_start = end - datetime.timedelta(days=MAX_RETENTION_DAYS - 1)
     start = start or default_start
 
     if start > end:
         raise PipelineError(f"start {start} is after end {end}")
-    _warn_if_before_retention_floor(start, "backfill start", retention_days=retention_days)
+    _warn_if_before_retention_floor(start, "backfill start", retention_days=MAX_RETENTION_DAYS)
 
     return _run_window(start, end, dry_run=dry_run)
 
@@ -343,9 +401,12 @@ def run_daily(*, date: datetime.date | None = None, dry_run: bool = False) -> Ru
     straight onto the API's event-time from/to params, like the reference
     script's from_date/to_date arguments, with TO defaulting to yesterday.
     """
-    retention_days = _active_retention_days()
+    # BAF-11 stage 4: same reasoning as run_backfill above -- MAX_RETENTION_DAYS,
+    # not _active_retention_days()'s cross-REPORTS minimum. installs clamps
+    # itself inside _iter_work_items; these two warn call sites are about
+    # in-app-events' own (hard_clamp_retention=False) floor.
     if date is not None:
-        _warn_if_before_retention_floor(date, "daily --date", retention_days=retention_days)
+        _warn_if_before_retention_floor(date, "daily --date", retention_days=MAX_RETENTION_DAYS)
         return _run_window(date, date, dry_run=dry_run)
 
     settings = get_settings()
@@ -355,7 +416,7 @@ def run_daily(*, date: datetime.date | None = None, dry_run: bool = False) -> Ru
         if start > end:
             raise PipelineError(f"APPSFLYER_EVENT_TIME_FROM {start} is after the window end {end}")
         _warn_if_before_retention_floor(
-            start, "APPSFLYER_EVENT_TIME_FROM", retention_days=retention_days
+            start, "APPSFLYER_EVENT_TIME_FROM", retention_days=MAX_RETENTION_DAYS
         )
         return _run_window(start, end, dry_run=dry_run)
 

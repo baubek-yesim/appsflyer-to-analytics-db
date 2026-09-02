@@ -11,10 +11,10 @@ import respx
 
 from appsflyer_pipeline import pipeline
 from appsflyer_pipeline.appsflyer_client import MAX_RETENTION_DAYS
-from appsflyer_pipeline.config import get_settings
+from appsflyer_pipeline.config import Settings, get_settings
 from appsflyer_pipeline.loader import ConnectionStatus, PipelineError
 from appsflyer_pipeline.pipeline import _iter_work_items, run_backfill, run_daily
-from appsflyer_pipeline.reports import ReportSpec
+from appsflyer_pipeline.reports import INSTALLS_RAW_COLUMNS, REPORTS, ReportSpec
 
 SAMPLE_CSV = (
     "Attributed Touch Time,Install Time,Event Time,Event Name,Event Value,Event Revenue,"
@@ -70,11 +70,33 @@ def _url(app_id: str, attribution_type: str) -> str:
     return f"https://hq1.appsflyer.com/api/raw-data/export/app/{app_id}/{endpoint}/v5"
 
 
+def _url_for_spec(spec: ReportSpec, app_id: str) -> str:
+    return f"https://hq1.appsflyer.com/api/raw-data/export/app/{app_id}/{spec.endpoint}/v5"
+
+
+def _installs_sample_csv() -> str:
+    values = dict.fromkeys(INSTALLS_RAW_COLUMNS, "")
+    values.update(
+        {
+            "AppsFlyer ID": "af-installs-1",
+            "Install Time": "2026-05-19 09:30:00",
+            "Event Time": "2026-05-19 09:30:00",
+            "Attributed Touch Time": "2026-05-19 09:00:00",
+            "Media Source": "Facebook Ads",
+        }
+    )
+    header = ",".join(INSTALLS_RAW_COLUMNS)
+    row = ",".join(values[c] for c in INSTALLS_RAW_COLUMNS)
+    return f"{header}\n{row}\n"
+
+
 def _mock_all_ok() -> None:
+    installs_csv = _installs_sample_csv()
     for app_id in APP_IDS:
-        for attribution_type in ATTRIBUTION_TYPES:
-            respx.get(_url(app_id, attribution_type)).mock(
-                return_value=httpx.Response(200, text=SAMPLE_CSV)
+        for spec in REPORTS.values():
+            csv_text = SAMPLE_CSV if spec.name == "in_app_events" else installs_csv
+            respx.get(_url_for_spec(spec, app_id)).mock(
+                return_value=httpx.Response(200, text=csv_text)
             )
 
 
@@ -134,36 +156,56 @@ def load_spy(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 
 
 def test_iter_work_items_yields_expected_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BAF-11 stage 4 (Architecture decision 5): REPORTS grew from 2 to 4
+    specs (in-app-events non_organic/retargeting + installs non_organic/
+    retargeting), so `one_series` must also pin `spec.name` -- otherwise it
+    matches both in-app-events' and installs' non_organic specs and the
+    per-series chunk count silently doubles. The window is deliberately
+    pinned recent (within installs' 60-day hard-clamp floor) so installs'
+    clamp is a no-op here and the cross-REPORTS `len(items)` equality holds.
+    """
     _set_env(monkeypatch)
     settings = get_settings()
-    start = datetime.date(2026, 1, 1)
-    end = datetime.date(2026, 3, 31)  # 89 days -> 3 chunks of <=31 days each
+    fixed_today = datetime.date(2026, 6, 1)
+    monkeypatch.setattr(pipeline, "_today", lambda: fixed_today)
+    start = datetime.date(2026, 4, 10)  # within installs' 60-day floor (2026-04-02)
+    end = datetime.date(2026, 5, 31)  # 51 days -> 2 chunks of <=31 days each
     items = list(_iter_work_items(settings, start, end))
 
     assert {app_id for _, app_id, _, _ in items} == set(APP_IDS)
+    assert {spec.name for spec, _, _, _ in items} == {"in_app_events", "installs"}
     assert {spec.attribution_type for spec, _, _, _ in items} == set(ATTRIBUTION_TYPES)
 
     one_series = [
-        (s, e) for spec, a, s, e in items if a == "app1" and spec.attribution_type == "non_organic"
+        (s, e)
+        for spec, a, s, e in items
+        if a == "app1" and spec.name == "in_app_events" and spec.attribution_type == "non_organic"
     ]
     assert one_series[0][0] == start
     assert one_series[-1][1] == end
     assert all((e - s).days < 31 for s, e in one_series)
-    assert len(items) == len(APP_IDS) * len(ATTRIBUTION_TYPES) * len(one_series)
+    assert len(items) == len(APP_IDS) * len(REPORTS) * len(one_series)
 
 
 def test_iter_work_items_respects_configured_chunk_days(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """See test_iter_work_items_yields_expected_matrix's docstring -- same
+    `spec.name` narrowing, same REPORTS-growth ripple (Architecture decision
+    5)."""
     _set_env(monkeypatch, APPSFLYER_CHUNK_DAYS="10")
     settings = get_settings()
+    fixed_today = datetime.date(2026, 2, 15)
+    monkeypatch.setattr(pipeline, "_today", lambda: fixed_today)
     start = datetime.date(2026, 1, 1)
     end = datetime.date(2026, 1, 31)  # 31 days -> 4 chunks of <=10 days each
 
     items = list(_iter_work_items(settings, start, end))
 
     one_series = [
-        (s, e) for spec, a, s, e in items if a == "app1" and spec.attribution_type == "non_organic"
+        (s, e)
+        for spec, a, s, e in items
+        if a == "app1" and spec.name == "in_app_events" and spec.attribution_type == "non_organic"
     ]
     assert all((e - s).days < 10 for s, e in one_series)
     assert len(one_series) == 4
@@ -460,7 +502,10 @@ def test_run_daily_lookback_widens_default_window(
         r.start_date == expected_start and r.end_date == expected_end for r in summary.results
     )
     # 3 days <= 31 -> still exactly one chunk (one report download) per combo: no extra quota.
-    assert len(summary.results) == len(APP_IDS) * len(ATTRIBUTION_TYPES)
+    # BAF-11 stage 4: REPORTS grew from 2 to 4 specs (Architecture decision 5)
+    # -- this 3-day window is well within installs' 60-day hard-clamp floor
+    # too, so all four specs contribute one unclamped chunk each.
+    assert len(summary.results) == len(APP_IDS) * len(REPORTS)
 
 
 def test_run_daily_explicit_date_ignores_lookback(
@@ -540,6 +585,15 @@ def test_run_daily_date_exactly_at_floor_does_not_warn(
     """The floor predicate is strict `<`: a date exactly AT the floor (and by
     extension the default 90-day backfill window, whose start equals it) must
     stay silent -- a `<=` regression would spam journald on every scheduled run.
+
+    This date (2026-04-10) is also before installs' own 60-day floor
+    (2026-05-10), so `_iter_work_items` legitimately logs its own "skipping
+    installs" warning for it (BAF-11 stage 4, Architecture decision 3) -- an
+    unavoidable consequence of the in-app-events 90-day boundary always being
+    earlier than installs' 60-day one, not a regression. This assertion is
+    narrowed to `_warn_if_before_retention_floor`'s own message text
+    ("Proceeding anyway", unique to it) so it stays scoped to the
+    in-app-events boundary behavior it's actually pinning.
     """
     _set_env(monkeypatch)
     monkeypatch.setattr(pipeline, "_today", lambda: datetime.date(2026, 7, 9))
@@ -549,7 +603,7 @@ def test_run_daily_date_exactly_at_floor_does_not_warn(
         _mock_all_ok()
         run_daily(date=datetime.date(2026, 4, 10), dry_run=True)
 
-    assert not any("retention floor" in record.message for record in caplog.records)
+    assert not any("Proceeding anyway" in record.message for record in caplog.records)
 
 
 def test_run_daily_config_event_time_window_beats_lookback(
@@ -634,3 +688,114 @@ def test_run_daily_old_event_time_from_warns(
         run_daily(dry_run=True)
 
     assert any("retention floor" in record.message for record in caplog.records)
+
+
+def test_iter_work_items_hard_clamps_installs_but_not_in_app_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Architecture decision 3: installs (hard_clamp_retention=True, 60 days)
+    gets its start date clamped up to the retention floor; in-app-events
+    (hard_clamp_retention=False, 90 days) keeps warn-and-proceed -- its
+    chunks still start at the caller's requested start regardless.
+    """
+    _set_env(monkeypatch)
+    settings = get_settings()
+    fixed_today = datetime.date(2026, 8, 31)
+    monkeypatch.setattr(pipeline, "_today", lambda: fixed_today)
+    start = fixed_today - datetime.timedelta(days=100)  # 100 days back
+    end = fixed_today - datetime.timedelta(days=1)
+
+    items = list(_iter_work_items(settings, start, end))
+
+    in_app_events_starts = {
+        s for spec, a, s, e in items if a == "app1" and spec.name == "in_app_events"
+    }
+    installs_starts = {s for spec, a, s, e in items if a == "app1" and spec.name == "installs"}
+
+    assert min(in_app_events_starts) == start  # unclamped -- 100 days back, unchanged
+    assert min(installs_starts) == fixed_today - datetime.timedelta(days=60)  # hard-clamped
+
+
+def test_iter_work_items_skips_installs_entirely_when_window_is_fully_before_the_floor(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _set_env(monkeypatch)
+    settings = get_settings()
+    fixed_today = datetime.date(2026, 8, 31)
+    monkeypatch.setattr(pipeline, "_today", lambda: fixed_today)
+    start = fixed_today - datetime.timedelta(days=200)
+    end = fixed_today - datetime.timedelta(days=150)  # entirely before the 60-day floor
+
+    with caplog.at_level(logging.WARNING, logger="appsflyer_pipeline.pipeline"):
+        items = list(_iter_work_items(settings, start, end))
+
+    installs_items = [i for i in items if i[0].name == "installs"]
+    in_app_events_items = [i for i in items if i[0].name == "in_app_events"]
+    assert installs_items == []  # nothing to fetch -- entirely before the hard floor
+    assert len(in_app_events_items) > 0  # in-app-events is unaffected (90-day retention)
+    assert any("entirely before" in r.message for r in caplog.records)
+
+
+def test_active_retention_days_narrows_to_installs_60_once_registered() -> None:
+    """No code change needed for this -- Stage 3's min(...)-based
+    _active_retention_days() already does the right thing once REPORTS grows
+    to include a 60-day spec. This test just locks in that it actually does.
+    """
+    from appsflyer_pipeline.pipeline import _active_retention_days
+
+    assert _active_retention_days() == 60
+
+
+def test_run_backfill_default_window_uses_max_retention_days_not_the_cross_report_minimum(
+    monkeypatch: pytest.MonkeyPatch, load_spy: list[dict[str, Any]]
+) -> None:
+    """Pins run_backfill's no-args default_start computation directly, by
+    capturing the start/end it actually passes to _iter_work_items --
+    independent of WindowResult, which carries no per-report-family identity
+    (see the note above). Proves Architecture decision 3's addendum: the
+    default resolves off MAX_RETENTION_DAYS (90), not
+    _active_retention_days()'s cross-REPORTS minimum, which drops to 60 the
+    moment installs (retention_days=60) is registered alongside in-app-events.
+    """
+    _set_env(monkeypatch)
+    fixed_today = datetime.date(2026, 7, 7)
+    monkeypatch.setattr(pipeline, "_today", lambda: fixed_today)
+    expected_end = fixed_today - datetime.timedelta(days=1)
+    expected_start = expected_end - datetime.timedelta(days=MAX_RETENTION_DAYS - 1)
+
+    captured: dict[str, datetime.date] = {}
+    real_iter_work_items = pipeline._iter_work_items
+
+    def _capturing_iter_work_items(
+        settings: Settings, start: datetime.date, end: datetime.date
+    ) -> Any:
+        captured["start"] = start
+        captured["end"] = end
+        return real_iter_work_items(settings, start, end)
+
+    monkeypatch.setattr(pipeline, "_iter_work_items", _capturing_iter_work_items)
+
+    with respx.mock:
+        _mock_all_ok()
+        run_backfill(dry_run=True)
+
+    assert captured["start"] == expected_start
+    assert captured["end"] == expected_end
+
+
+def test_installs_retention_floor_is_60_not_90(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_env(monkeypatch)
+    settings = get_settings()
+    fixed_today = datetime.date(2026, 8, 31)
+    monkeypatch.setattr(pipeline, "_today", lambda: fixed_today)
+    start = fixed_today - datetime.timedelta(days=80)  # between 60 and 90 days back
+    end = fixed_today - datetime.timedelta(days=1)
+
+    items = list(_iter_work_items(settings, start, end))
+
+    installs_starts = {s for spec, a, s, e in items if a == "app1" and spec.name == "installs"}
+    in_app_events_starts = {
+        s for spec, a, s, e in items if a == "app1" and spec.name == "in_app_events"
+    }
+    assert min(installs_starts) == fixed_today - datetime.timedelta(days=60)
+    assert min(in_app_events_starts) == start  # 80 days back, well within in-app-events' 90
