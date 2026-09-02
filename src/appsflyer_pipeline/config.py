@@ -50,6 +50,13 @@ class Settings(BaseSettings):
     db_password: str
     db_name: RequiredStr
     db_table: RequiredStr
+    # BAF-11 stage 4: installs/installs_retarget get their own table (ticket
+    # decision #2 — in-app-events stays on the same 17-column schema/table;
+    # installs' 128-column full-fields shape is a new table, not a migration
+    # of the existing one). Same validation as db_table: a truncated
+    # EnvironmentFile line must fail startup loudly (issue #29), not degrade
+    # to writing installs data into an empty-string table name.
+    db_table_installs: RequiredStr
 
     # AppsFlyer Pull API
     appsflyer_api_token: RequiredStr
@@ -66,6 +73,23 @@ class Settings(BaseSettings):
         "id1458505230",
     ]
 
+    # Which entries of reports.REPORTS a run is allowed to fetch (BAF-11 stage
+    # 4). REPORTS registers four specs, but only the two in-app-events ones are
+    # eligible by default: the installs specs are *available* to run — an
+    # operator opts a run in by naming them here, e.g.
+    # APPSFLYER_ENABLED_REPORTS=installs_non_organic,installs_retargeting — but
+    # must NOT be reachable by the deployed scheduled `daily` timer until the
+    # Этап 9 cutover decision (this stage's plan, "Out of scope"). Keys not in
+    # REPORTS are rejected at run time by pipeline._run_window rather than here:
+    # config.py deliberately imports nothing from the package (same reason
+    # MAX_RETENTION_DAYS is a literal above), so it cannot see the registry.
+    # min_length=1 for the usual issue-#9 reason: a truncated EnvironmentFile
+    # line must abort startup, not degrade to a run that fetches nothing.
+    appsflyer_enabled_reports: Annotated[CsvList, Field(min_length=1)] = [
+        "in_app_events_non_organic",
+        "in_app_events_retargeting",
+    ]
+
     # Run parameters — three-valued since BAF-11 stage 1:
     #   unset          -> no filter at all; the param never reaches the API and
     #                     transform keeps every row (the full raw export)
@@ -78,8 +102,10 @@ class Settings(BaseSettings):
     # NOTE the default flipped here: BAF-2 defaulted to "Facebook Ads" /
     # af_purchase,af_purchase_YC, so an environment that never set these keys
     # widens to every media source on upgrade. That is why `_run_window` logs
-    # the unfiltered mode at WARNING until stage 5 gives the full export its own
-    # table — today it would land in BAF-2's `appsflyer_events_fb`.
+    # the unfiltered mode at WARNING — the full in-app-events export still
+    # lands in BAF-2's `appsflyer_events_fb`. (BAF-11 stage 4 gave *installs*
+    # its own table, which is a per-report split, not a per-media-source one:
+    # it does not narrow what these two filters widen.)
     appsflyer_media_source: RequiredStr | None = None
     appsflyer_event_names: Annotated[CsvList, Field(min_length=1)] | None = None
 
@@ -124,7 +150,9 @@ class Settings(BaseSettings):
     # startup loudly, but a valid-but-wrong one cannot be caught client-side.
     appsflyer_timezone: RequiredStr | None = None
 
-    @field_validator("appsflyer_app_ids", "appsflyer_event_names", mode="before")
+    @field_validator(
+        "appsflyer_app_ids", "appsflyer_event_names", "appsflyer_enabled_reports", mode="before"
+    )
     @classmethod
     def _parse_csv_fields(cls, value: object) -> object:
         return _split_csv(value)

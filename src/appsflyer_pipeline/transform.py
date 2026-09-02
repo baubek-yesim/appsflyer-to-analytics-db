@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+from collections.abc import Callable
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
@@ -34,7 +35,29 @@ _TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 # table, so this value is stripped back off every row before transform_events
 # returns (see the `del` in transform_events below).
 _DEDUPE_DISCRIMINATOR_RAW_COLUMN = "Event Value"
-_DEDUPE_DISCRIMINATOR_ROW_KEY = "__dedupe_event_value"
+# BAF-11 stage 4: exported (no leading underscore) -- reports.py's in-app-events
+# dedupe_key function needs the exact same internal row key transform_events()
+# writes it under, so the two stay in sync by construction instead of by two
+# separately-maintained string literals.
+DEDUPE_DISCRIMINATOR_ROW_KEY = "__dedupe_event_value"
+
+# BAF-11 stage 4 (installs' full pass-through mode, ReportSpec.column_map=None):
+# raw AppsFlyer header -> target snake_case column name, with no per-report
+# hand-written dict. Reproduces every existing _IN_APP_EVENTS_COLUMN_MAP entry
+# exactly (pinned by test_transform.py's
+# test_normalize_matches_every_in_app_events_column_map_entry) -- the one
+# override below exists ONLY to dodge a real name collision (see the comment
+# on it), not to change behavior for anything already mapped by hand.
+_RAW_COLUMN_NAME_OVERRIDES: dict[str, str] = {
+    "App ID": "appsflyer_app_id",
+}
+
+
+def normalize_column_name(raw: str) -> str:
+    """Raw AppsFlyer CSV header -> target snake_case column name."""
+    if raw in _RAW_COLUMN_NAME_OVERRIDES:
+        return _RAW_COLUMN_NAME_OVERRIDES[raw]
+    return raw.strip().lower().replace(" ", "_")
 
 
 class TransformError(RuntimeError):
@@ -73,10 +96,19 @@ def _install_time_rank(row: dict[str, Any]) -> tuple[int, datetime.datetime]:
 
 
 def _dedupe_rows(
-    rows: list[dict[str, Any]], *, attribution_type: AttributionType, app_id: str
+    rows: list[dict[str, Any]],
+    *,
+    key_fn: Callable[[dict[str, Any]], tuple[Any, ...]],
+    attribution_type: AttributionType,
+    app_id: str,
 ) -> list[dict[str, Any]]:
-    """Keep exactly ONE row per (event_time, event_name, appsflyer_id,
-    Event Value) key: the one with the latest `install_time`.
+    """Keep exactly ONE row per `key_fn(row)`'s key: the one with the latest
+    `install_time`. `key_fn` is per-report (BAF-11 stage 4, ReportSpec.dedupe_key)
+    -- in-app-events' key_fn reproduces this function's original hardcoded
+    (event_time, event_name, appsflyer_id, Event Value) key exactly; installs'
+    key_fn is (appsflyer_id, event_time) instead -- see
+    docs/superpowers/plans/2026-08-31-baf-11-stage-4-installs-report.md's
+    Architecture decision 7 for the rationale and the open risk it flags.
 
     `attribution_type`/`app_id` are constant across one transform_events call, so
     this 3-column key is covariant with Mark's full 4-column dedup key (BAF-2
@@ -115,21 +147,16 @@ def _dedupe_rows(
     Exact duplicates still collapse separately: identical bytes carry no
     information that picking one of them could lose.
     """
-    slot_of_key: dict[tuple[Any, Any, Any, Any], int] = {}
+    slot_of_key: dict[tuple[Any, ...], int] = {}
     kept: list[dict[str, Any]] = []
     duplicate_count = 0
     conflict_count = 0
     tie_count = 0
     discarded_revenue = Decimal(0)
-    first_conflict: tuple[Any, Any, Any, Any] | None = None
+    first_conflict: tuple[Any, ...] | None = None
 
     for row in rows:
-        key = (
-            row["event_time"],
-            row["event_name"],
-            row["appsflyer_id"],
-            row[_DEDUPE_DISCRIMINATOR_ROW_KEY],
-        )
+        key = key_fn(row)
         slot = slot_of_key.get(key)
         if slot is None:
             slot_of_key[key] = len(kept)
@@ -215,15 +242,47 @@ def transform_events(
     both — see `_dedupe_rows`.
     """
     attribution_type = spec.attribution_type
-    column_map = spec.column_map
-    missing = [
-        raw for raw in (*column_map, _DEDUPE_DISCRIMINATOR_RAW_COLUMN) if raw not in df.columns
-    ]
-    if missing:
-        raise TransformError(
-            f"AppsFlyer response is missing expected column(s): {missing} "
-            f"(attribution_type={attribution_type}, app_id={app_id})"
-        )
+
+    if spec.column_map is not None:
+        column_map = dict(spec.column_map)
+        missing = [
+            raw for raw in (*column_map, _DEDUPE_DISCRIMINATOR_RAW_COLUMN) if raw not in df.columns
+        ]
+        if missing:
+            raise TransformError(
+                f"AppsFlyer response is missing expected column(s): {missing} "
+                f"(attribution_type={attribution_type}, app_id={app_id})"
+            )
+    else:
+        # BAF-11 stage 4 (installs, ReportSpec.column_map=None): full
+        # pass-through -- normalize whatever raw columns AppsFlyer actually
+        # returned instead of consulting a fixed dict, so a 128-field report
+        # doesn't need one hand-maintained mapping entry per column. Still
+        # validated, not blindly trusted: the normalized column set (plus the
+        # two injected columns) must equal spec.insert_columns exactly, so an
+        # AppsFlyer schema change (a column renamed, added, or dropped) fails
+        # loudly here instead of silently drifting from the installs table's
+        # DDL.
+        if _DEDUPE_DISCRIMINATOR_RAW_COLUMN not in df.columns:
+            raise TransformError(
+                f"AppsFlyer response is missing expected column(s): "
+                f"['{_DEDUPE_DISCRIMINATOR_RAW_COLUMN}'] "
+                f"(attribution_type={attribution_type}, app_id={app_id})"
+            )
+        # raw AppsFlyer header -> normalized target name (NOT the reverse --
+        # a swapped key/value here makes every downstream row-building line
+        # look up a raw header string where it expects a snake_case name,
+        # caught immediately by Step 7's test run).
+        column_map = {raw: normalize_column_name(raw) for raw in df.columns}
+        produced = set(column_map.values()) | {"attribution_type", "app_id"}
+        expected = set(spec.insert_columns)
+        if produced != expected:
+            raise TransformError(
+                "AppsFlyer response's column set does not match the expected "
+                f"installs schema -- missing: {sorted(expected - produced)}, "
+                f"unexpected: {sorted(produced - expected)} "
+                f"(attribution_type={attribution_type}, app_id={app_id})"
+            )
 
     # Issue #26: this early-return must stay BELOW the column check. Only a
     # schema-valid empty (expected headers, zero rows -- the shape a genuinely
@@ -249,10 +308,10 @@ def transform_events(
 
     rows: list[dict[str, Any]] = []
     skipped_missing_required = 0
-    select_columns = [*column_map, _DEDUPE_DISCRIMINATOR_RAW_COLUMN]
+    select_columns = list(dict.fromkeys([*column_map, _DEDUPE_DISCRIMINATOR_RAW_COLUMN]))
     for raw_row in filtered.select(select_columns).iter_rows(named=True):
         row: dict[str, Any] = {target: raw_row[raw] for raw, target in column_map.items()}
-        row[_DEDUPE_DISCRIMINATOR_ROW_KEY] = raw_row[_DEDUPE_DISCRIMINATOR_RAW_COLUMN]
+        row[DEDUPE_DISCRIMINATOR_ROW_KEY] = raw_row[_DEDUPE_DISCRIMINATOR_RAW_COLUMN]
         for ts_col in spec.timestamp_columns:
             row[ts_col] = _parse_timestamp(row[ts_col])
         row["event_revenue"] = _parse_revenue(row["event_revenue"])
@@ -274,7 +333,9 @@ def transform_events(
             app_id,
         )
 
-    deduped = _dedupe_rows(rows, attribution_type=attribution_type, app_id=app_id)
+    deduped = _dedupe_rows(
+        rows, key_fn=spec.dedupe_key, attribution_type=attribution_type, app_id=app_id
+    )
     for row in deduped:
-        del row[_DEDUPE_DISCRIMINATOR_ROW_KEY]
+        del row[DEDUPE_DISCRIMINATOR_ROW_KEY]
     return deduped

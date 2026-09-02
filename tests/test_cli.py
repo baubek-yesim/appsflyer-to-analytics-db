@@ -23,6 +23,7 @@ UNREACHABLE_ENV = {
     "DB_PASSWORD": "pw",
     "DB_NAME": "db",
     "DB_TABLE": "some_table",
+    "DB_TABLE_INSTALLS": "some_installs_table",
     "APPSFLYER_API_TOKEN": "token",
     "APPSFLYER_APP_IDS": "id1",
 }
@@ -99,19 +100,67 @@ def test_check_connection_reports_status_for_both_branches(
 
 def test_create_table_success_reports_ready(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_cli_env(monkeypatch)
-    monkeypatch.setattr(cli, "create_table", lambda engine, table_name: None)
+    monkeypatch.setattr(cli, "create_table", lambda engine, table_name, report_name: None)
 
     result = runner.invoke(app, ["create-table"])
 
     get_settings.cache_clear()
     assert result.exit_code == 0
     assert "is ready." in result.output
+    assert result.output.count("is ready.") == 2  # BAF-11 stage 4: two distinct tables now
+
+
+def test_create_table_covers_disabled_reports_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The deliberate asymmetry documented at the top of cli.py: `create-table`
+    provisions EVERY registered report's table, including installs', even
+    though APPSFLYER_ENABLED_REPORTS is left at its in-app-events-only default
+    and so no run would fetch installs. Provisioning is inert; fetching spends
+    quota and writes rows.
+    """
+    _set_cli_env(monkeypatch)
+    created: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        cli,
+        "create_table",
+        lambda engine, table_name, report_name: created.append((table_name, report_name)),
+    )
+
+    result = runner.invoke(app, ["create-table"])
+
+    get_settings.cache_clear()
+    assert result.exit_code == 0
+    assert sorted(created) == sorted(
+        [
+            (CLI_ENV["DB_TABLE"], "in_app_events"),
+            (CLI_ENV["DB_TABLE_INSTALLS"], "installs"),
+        ]
+    )
+
+
+def test_check_connection_covers_disabled_reports_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same asymmetry, read-only half: an operator must be able to verify the
+    installs table exists without opting a run into pulling installs.
+    """
+    _set_cli_env(monkeypatch)
+    checked: list[str] = []
+
+    def _fake_check_connection(engine: object, table_name: str) -> ConnectionStatus:
+        checked.append(table_name)
+        return ConnectionStatus(server_version="8.0.35", table_exists=True, row_count=0)
+
+    monkeypatch.setattr(cli, "check_connection", _fake_check_connection)
+
+    result = runner.invoke(app, ["check-connection"])
+
+    get_settings.cache_clear()
+    assert result.exit_code == 0
+    assert sorted(checked) == sorted([CLI_ENV["DB_TABLE"], CLI_ENV["DB_TABLE_INSTALLS"]])
 
 
 def test_create_table_reports_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_cli_env(monkeypatch)
 
-    def _raise(engine: object, table_name: str) -> None:
+    def _raise(engine: object, table_name: str, report_name: str) -> None:
         raise PipelineError(f"Could not create table `{table_name}`: boom")
 
     monkeypatch.setattr(cli, "create_table", _raise)
@@ -161,6 +210,7 @@ def test_format_validation_error_never_includes_input_values(
     for key in (
         "DB_NAME",
         "DB_TABLE",
+        "DB_TABLE_INSTALLS",
         "APPSFLYER_API_TOKEN",
         "APPSFLYER_APP_IDS",
         "APPSFLYER_MEDIA_SOURCE",
@@ -254,6 +304,33 @@ def test_backfill_partial_failure_exits_one_with_fail_line(
     get_settings.cache_clear()
     assert result.exit_code == 1
     assert "FAIL" in result.output
+
+
+@respx.mock
+def test_summary_lines_name_the_report_family(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BAF-11 stage 4: REPORTS can hold several specs per
+    (app_id, attribution_type), so an OK/FAIL line keyed only on those two is
+    ambiguous. Both line shapes must carry the report family
+    (`[non_organic/in_app_events]`).
+    """
+    _set_cli_env(monkeypatch)
+    respx.get(_af_url("app1", "non_organic")).mock(
+        return_value=httpx.Response(200, text=SAMPLE_CSV)
+    )
+    respx.get(_af_url("app1", "retargeting")).mock(return_value=httpx.Response(401, text="nope"))
+
+    result = runner.invoke(
+        app,
+        ["backfill", "--start-date", "2026-05-20", "--end-date", "2026-05-20", "--dry-run"],
+    )
+
+    get_settings.cache_clear()
+    assert result.exit_code == 1
+    assert (
+        "OK   app1 [non_organic/in_app_events] 2026-05-20..2026-05-20: fetched=1 loaded=1"
+        in result.output
+    )
+    assert "FAIL app1 [retargeting/in_app_events] 2026-05-20..2026-05-20: " in result.output
 
 
 def test_backfill_invalid_start_date_fails_fast(monkeypatch: pytest.MonkeyPatch) -> None:

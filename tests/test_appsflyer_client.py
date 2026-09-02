@@ -187,12 +187,17 @@ def test_fetch_events_sends_timezone_param_when_configured() -> None:
 
 
 @respx.mock
-def test_fetch_events_never_sends_additional_fields() -> None:
-    """Pins the request shape: no `additional_fields` param, ever. Standard v5
-    columns must not be requested that way — e.g. `is_primary_attribution` gets
-    HTTP 400 "Unknown additional field" from the real API (verified live,
-    2026-07-07, during #7; the filter itself was later removed by #47 but the
-    API fact stands).
+def test_fetch_events_never_sends_additional_fields_for_in_app_events() -> None:
+    """Pins the request shape: no `additional_fields` param, ever, for
+    in-app-events specs specifically. Standard v5 columns must not be
+    requested that way — e.g. `is_primary_attribution` gets HTTP 400 "Unknown
+    additional field" from the real API (verified live, 2026-07-07, during
+    #7; the filter itself was later removed by #47 but the API fact stands).
+
+    Scoped to `not spec.additional_fields` (BAF-11 stage 4, Architecture
+    decision 5) rather than looping every `REPORTS` entry: installs' specs
+    (added this stage) send 47 `additional_fields` by design -- see
+    `test_fetch_events_sends_all_47_additional_fields_for_installs` below.
     """
     ua_route = respx.get(_url("id123", "non_organic")).mock(
         return_value=httpx.Response(200, text=SAMPLE_CSV)
@@ -201,7 +206,7 @@ def test_fetch_events_never_sends_additional_fields() -> None:
         return_value=httpx.Response(200, text=SAMPLE_CSV)
     )
     with httpx.Client() as client:
-        for spec in REPORTS.values():
+        for spec in (s for s in REPORTS.values() if not s.additional_fields):
             fetch_events(
                 client,
                 app_id="id123",
@@ -214,6 +219,108 @@ def test_fetch_events_never_sends_additional_fields() -> None:
             )
     for route in (ua_route, rt_route):
         assert "additional_fields" not in route.calls.last.request.url.params
+
+
+@respx.mock
+def test_fetch_events_sends_all_47_additional_fields_for_installs() -> None:
+    """Master spec Этап 6 test list: additional_fields уходит списком из 47 имён."""
+    spec = REPORTS["installs_non_organic"]
+    url = f"https://hq1.appsflyer.com/api/raw-data/export/app/id123/{spec.endpoint}/v5"
+    route = respx.get(url).mock(return_value=httpx.Response(200, text=SAMPLE_CSV))
+    with httpx.Client() as client:
+        fetch_events(
+            client,
+            app_id="id123",
+            spec=spec,
+            from_date=datetime.date(2026, 5, 20),
+            to_date=datetime.date(2026, 5, 20),
+            api_token="token",
+            media_source=None,
+            event_names=None,
+        )
+    sent = route.calls.last.request.url.params["additional_fields"].split(",")
+    assert len(sent) == 47
+    assert sent == list(spec.additional_fields)
+
+
+@respx.mock
+def test_fetch_events_never_sends_event_name_for_installs() -> None:
+    """sends_event_name=False (ReportSpec) must suppress event_name even when
+    the caller passes event_names -- installs has no purchase-event-name
+    concept to filter on.
+    """
+    spec = REPORTS["installs_non_organic"]
+    url = f"https://hq1.appsflyer.com/api/raw-data/export/app/id123/{spec.endpoint}/v5"
+    route = respx.get(url).mock(return_value=httpx.Response(200, text=SAMPLE_CSV))
+    with httpx.Client() as client:
+        fetch_events(
+            client,
+            app_id="id123",
+            spec=spec,
+            from_date=datetime.date(2026, 5, 20),
+            to_date=datetime.date(2026, 5, 20),
+            api_token="token",
+            media_source=None,
+            event_names=["af_purchase"],  # explicitly passed, must still be suppressed
+        )
+    assert "event_name" not in route.calls.last.request.url.params
+
+
+@respx.mock
+def test_fetch_events_sends_timezone_for_installs_regression() -> None:
+    """Regression guard (BAF-11 decision #6): a UTC/Riga split between the
+    in-app-events and installs tables would be invisible unless this is
+    tested per-report, not just once for in-app-events. Must NOT regress to
+    UTC-only for installs.
+    """
+    spec = REPORTS["installs_non_organic"]
+    url = f"https://hq1.appsflyer.com/api/raw-data/export/app/id123/{spec.endpoint}/v5"
+    route = respx.get(url).mock(return_value=httpx.Response(200, text=SAMPLE_CSV))
+    with httpx.Client() as client:
+        fetch_events(
+            client,
+            app_id="id123",
+            spec=spec,
+            from_date=datetime.date(2026, 5, 20),
+            to_date=datetime.date(2026, 5, 20),
+            api_token="token",
+            media_source=None,
+            event_names=None,
+            timezone="Europe/Riga",
+        )
+    assert route.calls.last.request.url.params["timezone"] == "Europe/Riga"
+
+
+@respx.mock
+def test_fetch_events_hits_installs_retarget_endpoint() -> None:
+    """Master spec Этап 6 test list: "оба URL корректны" (both URLs are
+    correct) -- the three tests above only ever exercise
+    REPORTS["installs_non_organic"] (endpoint installs_report) directly.
+    installs_retargeting's endpoint (installs-retarget) was otherwise only
+    ever hit indirectly, through Task 5's pipeline-level respx routing
+    (_mock_all_ok()/_url_for_spec) -- this pins the URL/params shape at the
+    client layer itself, closing out the master spec's item the same way the
+    existing in-app-events non_organic-vs-retargeting tests already do for
+    that report family.
+    """
+    spec = REPORTS["installs_retargeting"]
+    url = f"https://hq1.appsflyer.com/api/raw-data/export/app/id123/{spec.endpoint}/v5"
+    route = respx.get(url).mock(return_value=httpx.Response(200, text=SAMPLE_CSV))
+    with httpx.Client() as client:
+        fetch_events(
+            client,
+            app_id="id123",
+            spec=spec,
+            from_date=datetime.date(2026, 5, 20),
+            to_date=datetime.date(2026, 5, 20),
+            api_token="token",
+            media_source=None,
+            event_names=None,
+        )
+    assert route.called
+    sent = route.calls.last.request.url.params["additional_fields"].split(",")
+    assert sent == list(spec.additional_fields)
+    assert "event_name" not in route.calls.last.request.url.params
 
 
 @respx.mock

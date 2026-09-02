@@ -20,6 +20,13 @@
 - Real-time/streaming ingestion — this is a scheduled batch pull.
 - Replacing or migrating the legacy `statistics.yesim_appsflyer_raw_events` table (co-existence is fine).
 - Building analytics/BI on top of the loaded data (out of scope for this ticket).
+- **Making the installs/installs_retarget tables live in production (BAF-11 stage 4 scope note).**
+  This stage registers the `ReportSpec`s and creates the table shape (usable manually and via
+  `--dry-run`); it does not enable installs in the scheduled daily/backfill timer. Cutover — running
+  installs against real data on a schedule — is BAF-11 Этап 9, itself gated on the
+  `appsflyer_events_fb` PK/index migration (Этап 7, unrelated to installs' own new
+  `idx_app_attr_install` index, which this stage's DDL already includes). The in-app-events
+  exact-duplicate-collapse dedupe-policy question (Этап 8b) is likewise untouched by this stage.
 
 ## Requirements
 
@@ -99,8 +106,10 @@
   floor is *not* silently clamped — the request proceeds and a warning is logged, since the resulting
   behavior is itself evidence toward resolving that open question.
 - **Config (env / `.env`):** see `.env.example` — `DB_HOST/PORT/USER/PASSWORD/NAME/TABLE`,
-  `APPSFLYER_API_TOKEN`, `APPSFLYER_APP_IDS`, `APPSFLYER_MEDIA_SOURCE`, `APPSFLYER_EVENT_NAMES`,
-  `APPSFLYER_DAILY_LOOKBACK_DAYS` (default 1), `APPSFLYER_CHUNK_DAYS` (default 31), `APPSFLYER_TIMEZONE` (issue #53; unset = UTC,
+  `DB_TABLE_INSTALLS` (BAF-11 stage 4 — installs/installs_retarget's own table, same validation as
+  `DB_TABLE`), `APPSFLYER_API_TOKEN`, `APPSFLYER_APP_IDS`, `APPSFLYER_MEDIA_SOURCE`,
+  `APPSFLYER_EVENT_NAMES`, `APPSFLYER_DAILY_LOOKBACK_DAYS` (default 1), `APPSFLYER_CHUNK_DAYS`
+  (default 31), `APPSFLYER_TIMEZONE` (issue #53; unset = UTC,
   production sets `Europe/Riga` so report times and day boundaries match the analytics team's
   references). The two CSV list fields reject empty values at
   startup (issue #9) — a truncated EnvironmentFile line fails loudly instead of producing a
@@ -113,7 +122,10 @@
   [`docs/superpowers/specs/2026-08-13-baf-11-column-sizing.md`](superpowers/specs/2026-08-13-baf-11-column-sizing.md):
   7,707 unfiltered event rows/day against a couple of dozen Meta purchases). Every run logs its
   effective mode; the unfiltered mode logs at WARNING while both modes still share one table.
-- **Table schema:** `sql/create_table.sql` (Stage 2), per Mark's DDL in BAF-2 comment 62293.
+- **Table schema:** `sql/create_table.sql` (Stage 2, in-app-events), per Mark's DDL in BAF-2 comment
+  62293; `sql/create_table_installs.sql` (BAF-11 stage 4, installs/installs_retarget's own
+  128-column table) — see `docs/superpowers/specs/2026-08-13-baf-11-column-sizing.md` for the
+  column-length measurement it's sized from.
 
 ## Alternatives Considered
 

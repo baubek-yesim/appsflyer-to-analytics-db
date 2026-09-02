@@ -21,6 +21,14 @@ from appsflyer_pipeline.logging_config import configure_logging
 from appsflyer_pipeline.pipeline import RunSummary, run_backfill, run_daily
 from appsflyer_pipeline.reports import REPORTS
 
+# DELIBERATE ASYMMETRY, do not "fix" this to match pipeline._iter_work_items:
+# `check-connection`/`create-table` below iterate EVERY entry in REPORTS,
+# ignoring `settings.appsflyer_enabled_reports`, while a backfill/daily run
+# only touches the enabled ones (BAF-11 stage 4's opt-in gate). That is the
+# point: an operator must be able to provision and verify the installs table
+# ahead of an eventual real Этап 9 cutover without that act, by itself,
+# starting to pull installs data through the deployed timer. Provisioning a
+# table is inert; fetching a report spends AppsFlyer quota and writes rows.
 app = typer.Typer(
     name="appsflyer-pipeline",
     help="Load AppsFlyer Pull API purchase events into the analytics MariaDB (BAF-2).",
@@ -47,9 +55,11 @@ def version() -> None:
 
 @app.command(name="check-connection")
 def check_connection_command() -> None:
-    """Verify connectivity to the analytics MariaDB and report every active
-    report's target table status (BAF-11 stage 3: today that's exactly one
-    table, appsflyer_events_fb, shared by both registered ReportSpecs).
+    """Verify connectivity to the analytics MariaDB and report every REGISTERED
+    report's target table status -- since BAF-11 stage 4 that is two distinct
+    tables: in-app-events' (`DB_TABLE`, shared by its two specs) and installs'
+    (`DB_TABLE_INSTALLS`, likewise shared by its two). Registered, not enabled
+    -- see the asymmetry note at the top of this module.
     """
     settings = _get_settings_or_exit()
     engine = create_engine(settings)
@@ -70,20 +80,22 @@ def check_connection_command() -> None:
 
 @app.command(name="create-table")
 def create_table_command() -> None:
-    """Create every active report's target table if it doesn't already exist
-    (idempotent). BAF-11 stage 3: today that's exactly one table.
+    """Create every REGISTERED report's target table if it doesn't already
+    exist (idempotent). BAF-11 stage 4: two distinct tables -- in-app-events'
+    17-column schema and installs' 130-column one. Registered, not enabled --
+    see the asymmetry note at the top of this module.
     """
     settings = _get_settings_or_exit()
     engine = create_engine(settings)
-    tables = sorted({spec.table(settings) for spec in REPORTS.values()})
+    tables = sorted({(spec.table(settings), spec.name) for spec in REPORTS.values()})
     try:
-        for table in tables:
-            create_table(engine, table)
+        for table, report_name in tables:
+            create_table(engine, table, report_name)
     except PipelineError as exc:
         typer.echo(f"FAILED: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
-    for table in tables:
+    for table, _report_name in tables:
         typer.echo(f"Table `{table}` is ready.")
 
 
@@ -130,17 +142,16 @@ def _get_settings_or_exit() -> Settings:
 
 
 def _print_summary(summary: RunSummary) -> None:
+    # The bracketed field carries BOTH attribution type and report family
+    # (BAF-11 stage 4): REPORTS can hold several specs per
+    # (app_id, attribution_type), so without `r.report` two lines of a run
+    # would be textually identical and name different rows.
     for r in summary.results:
+        unit = f"{r.app_id} [{r.attribution_type}/{r.report}] {r.start_date}..{r.end_date}"
         if r.succeeded:
-            typer.echo(
-                f"  OK   {r.app_id} [{r.attribution_type}] {r.start_date}..{r.end_date}: "
-                f"fetched={r.fetched_rows} loaded={r.loaded_rows}"
-            )
+            typer.echo(f"  OK   {unit}: fetched={r.fetched_rows} loaded={r.loaded_rows}")
         else:
-            typer.echo(
-                f"  FAIL {r.app_id} [{r.attribution_type}] {r.start_date}..{r.end_date}: {r.error}",
-                err=True,
-            )
+            typer.echo(f"  FAIL {unit}: {r.error}", err=True)
     verb = "Would load" if summary.dry_run else "Loaded"
     typer.echo(
         f"{verb} {summary.total_loaded} rows across "

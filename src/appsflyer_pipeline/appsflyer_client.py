@@ -92,8 +92,9 @@ def _fetch_csv(
         # Issue #53: without this param AppsFlyer reports in UTC; with it, event
         # times and the from/to day boundaries follow the app's configured zone.
         params["timezone"] = timezone
-    # BAF-11 stage 3: both registered specs have additional_fields=(), so this
-    # is dead for now -- installs (stage 5/6) is the first spec to set it.
+    # Live since BAF-11 stage 4: installs' two specs request 47
+    # additional_fields (in-app-events' two still set it to (), so the param is
+    # absent for them). Confirmed live 2026-08-13 -- all 47 land, no HTTP 400.
     if spec.additional_fields:
         params["additional_fields"] = ",".join(spec.additional_fields)
     headers = {
