@@ -34,7 +34,29 @@ _TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 # table, so this value is stripped back off every row before transform_events
 # returns (see the `del` in transform_events below).
 _DEDUPE_DISCRIMINATOR_RAW_COLUMN = "Event Value"
-_DEDUPE_DISCRIMINATOR_ROW_KEY = "__dedupe_event_value"
+# BAF-11 stage 4: exported (no leading underscore) -- reports.py's in-app-events
+# dedupe_key function needs the exact same internal row key transform_events()
+# writes it under, so the two stay in sync by construction instead of by two
+# separately-maintained string literals.
+DEDUPE_DISCRIMINATOR_ROW_KEY = "__dedupe_event_value"
+
+# BAF-11 stage 4 (installs' full pass-through mode, ReportSpec.column_map=None):
+# raw AppsFlyer header -> target snake_case column name, with no per-report
+# hand-written dict. Reproduces every existing _IN_APP_EVENTS_COLUMN_MAP entry
+# exactly (pinned by test_transform.py's
+# test_normalize_matches_every_in_app_events_column_map_entry) -- the one
+# override below exists ONLY to dodge a real name collision (see the comment
+# on it), not to change behavior for anything already mapped by hand.
+_RAW_COLUMN_NAME_OVERRIDES: dict[str, str] = {
+    "App ID": "appsflyer_app_id",
+}
+
+
+def normalize_column_name(raw: str) -> str:
+    """Raw AppsFlyer CSV header -> target snake_case column name."""
+    if raw in _RAW_COLUMN_NAME_OVERRIDES:
+        return _RAW_COLUMN_NAME_OVERRIDES[raw]
+    return raw.strip().lower().replace(" ", "_")
 
 
 class TransformError(RuntimeError):
@@ -128,7 +150,7 @@ def _dedupe_rows(
             row["event_time"],
             row["event_name"],
             row["appsflyer_id"],
-            row[_DEDUPE_DISCRIMINATOR_ROW_KEY],
+            row[DEDUPE_DISCRIMINATOR_ROW_KEY],
         )
         slot = slot_of_key.get(key)
         if slot is None:
@@ -252,7 +274,7 @@ def transform_events(
     select_columns = [*column_map, _DEDUPE_DISCRIMINATOR_RAW_COLUMN]
     for raw_row in filtered.select(select_columns).iter_rows(named=True):
         row: dict[str, Any] = {target: raw_row[raw] for raw, target in column_map.items()}
-        row[_DEDUPE_DISCRIMINATOR_ROW_KEY] = raw_row[_DEDUPE_DISCRIMINATOR_RAW_COLUMN]
+        row[DEDUPE_DISCRIMINATOR_ROW_KEY] = raw_row[_DEDUPE_DISCRIMINATOR_RAW_COLUMN]
         for ts_col in spec.timestamp_columns:
             row[ts_col] = _parse_timestamp(row[ts_col])
         row["event_revenue"] = _parse_revenue(row["event_revenue"])
@@ -276,5 +298,5 @@ def transform_events(
 
     deduped = _dedupe_rows(rows, attribution_type=attribution_type, app_id=app_id)
     for row in deduped:
-        del row[_DEDUPE_DISCRIMINATOR_ROW_KEY]
+        del row[DEDUPE_DISCRIMINATOR_ROW_KEY]
     return deduped

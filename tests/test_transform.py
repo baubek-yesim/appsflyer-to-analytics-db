@@ -10,7 +10,51 @@ import pytest
 
 from appsflyer_pipeline.appsflyer_client import AttributionType
 from appsflyer_pipeline.reports import REPORTS
-from appsflyer_pipeline.transform import TransformError, transform_events
+from appsflyer_pipeline.transform import TransformError, normalize_column_name, transform_events
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("Event Time", "event_time"),
+        ("Install Time", "install_time"),
+        ("Attributed Touch Time", "attributed_touch_time"),
+        ("Event Name", "event_name"),
+        ("Event Revenue", "event_revenue"),
+        ("Media Source", "media_source"),
+        ("Channel", "channel"),
+        ("Campaign", "campaign"),
+        ("Campaign ID", "campaign_id"),
+        ("Adset", "adset"),
+        ("Adset ID", "adset_id"),
+        ("Ad", "ad"),
+        ("Ad ID", "ad_id"),
+        ("AppsFlyer ID", "appsflyer_id"),
+        ("Customer User ID", "customer_user_id"),
+    ],
+)
+def test_normalize_matches_every_in_app_events_column_map_entry(raw: str, expected: str) -> None:
+    """BAF-11 stage 4: normalize_column_name must reproduce every existing
+    hand-written _IN_APP_EVENTS_COLUMN_MAP entry exactly -- it's about to
+    become the ONLY mapping mechanism for installs' full pass-through mode,
+    so a divergence here would silently rename a column relative to
+    in-app-events' precedent.
+    """
+    assert normalize_column_name(raw) == expected
+
+
+def test_normalize_handles_digits_in_contributor_columns() -> None:
+    assert normalize_column_name("Contributor 1 Touch Time") == "contributor_1_touch_time"
+    assert normalize_column_name("Contributor 2 Media Source") == "contributor_2_media_source"
+
+
+def test_normalize_renames_raw_app_id_to_avoid_collision() -> None:
+    """AppsFlyer's own "App ID" field would otherwise normalize to "app_id",
+    colliding with the pipeline's OWN injected app_id column (the queried
+    app, added by transform_events after mapping).
+    """
+    assert normalize_column_name("App ID") == "appsflyer_app_id"
+
 
 _SPEC_BY_ATTRIBUTION = {
     "non_organic": REPORTS["in_app_events_non_organic"],
