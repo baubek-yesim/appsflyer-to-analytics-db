@@ -10,12 +10,17 @@ from __future__ import annotations
 
 import polars as pl
 
-from appsflyer_pipeline.reports import REPORTS
+from appsflyer_pipeline.reports import INSTALLS_ADDITIONAL_FIELDS, INSTALLS_RAW_COLUMNS, REPORTS
 from appsflyer_pipeline.transform import transform_events
 
 
 def test_registry_covers_in_app_events_non_organic_and_retargeting() -> None:
-    assert set(REPORTS) == {"in_app_events_non_organic", "in_app_events_retargeting"}
+    # BAF-11 stage 4: narrowed from `set(REPORTS) == {...}` to a subset check --
+    # REPORTS now also holds the two installs specs (see
+    # test_registry_covers_installs_alongside_in_app_events for the full-set
+    # assertion). Only the iteration/count assumption changes here; every
+    # per-spec expected value below is untouched.
+    assert {"in_app_events_non_organic", "in_app_events_retargeting"} <= set(REPORTS)
 
 
 def test_non_organic_spec_matches_the_existing_endpoint_and_attribution_type() -> None:
@@ -33,24 +38,36 @@ def test_retargeting_spec_matches_the_existing_endpoint_and_attribution_type() -
 
 
 def test_both_specs_send_event_name_and_media_source_and_no_additional_fields() -> None:
-    for spec in REPORTS.values():
+    # BAF-11 stage 4: narrowed from `REPORTS.values()` to the two in-app-events
+    # keys -- installs' specs legitimately have sends_event_name=False and 47
+    # additional_fields (see test_both_installs_specs_never_send_event_name_...
+    # below), so iterating the whole registry no longer matches what this test
+    # means. Expected values for in-app-events are unchanged.
+    for key in ("in_app_events_non_organic", "in_app_events_retargeting"):
+        spec = REPORTS[key]
         assert spec.sends_event_name is True
         assert spec.sends_media_source is True
         assert spec.additional_fields == ()
 
 
 def test_both_specs_share_the_in_app_events_table_and_retention() -> None:
-    for spec in REPORTS.values():
+    # BAF-11 stage 4: narrowed from `REPORTS.values()` -- installs has its own
+    # 60-day retention (test_both_installs_specs_have_a_hard_clamped_60_day_retention).
+    for key in ("in_app_events_non_organic", "in_app_events_retargeting"):
+        spec = REPORTS[key]
         assert spec.retention_days == 90
         assert spec.window_column == "event_time"
 
 
 def test_table_callable_reads_settings_db_table() -> None:
+    # BAF-11 stage 4: narrowed from `REPORTS.values()` -- installs' table
+    # callable reads settings.db_table_installs, not settings.db_table (see
+    # test_installs_table_callable_reads_settings_db_table_installs below).
     class _FakeSettings:
         db_table = "appsflyer_events_fb"
 
-    for spec in REPORTS.values():
-        assert spec.table(_FakeSettings()) == "appsflyer_events_fb"  # type: ignore[arg-type]
+    for key in ("in_app_events_non_organic", "in_app_events_retargeting"):
+        assert REPORTS[key].table(_FakeSettings()) == "appsflyer_events_fb"  # type: ignore[arg-type]
 
 
 def _raw_row_for(column_map: dict[str, str]) -> dict[str, str]:
@@ -85,3 +102,78 @@ def test_insert_columns_match_transform_events_output_keys_for_every_report() ->
 
         assert len(rows) == 1
         assert set(rows[0]) == set(spec.insert_columns)
+
+
+def test_registry_covers_installs_alongside_in_app_events() -> None:
+    assert set(REPORTS) == {
+        "in_app_events_non_organic",
+        "in_app_events_retargeting",
+        "installs_non_organic",
+        "installs_retargeting",
+    }
+
+
+def test_installs_non_organic_spec_matches_the_confirmed_live_endpoint() -> None:
+    spec = REPORTS["installs_non_organic"]
+    assert spec.name == "installs"
+    assert spec.endpoint == "installs_report"
+    assert spec.attribution_type == "non_organic"
+
+
+def test_installs_retargeting_spec_matches_the_confirmed_live_endpoint() -> None:
+    spec = REPORTS["installs_retargeting"]
+    assert spec.name == "installs"
+    assert spec.endpoint == "installs-retarget"
+    assert spec.attribution_type == "retargeting"
+
+
+def test_both_installs_specs_never_send_event_name_but_send_47_additional_fields() -> None:
+    for key in ("installs_non_organic", "installs_retargeting"):
+        spec = REPORTS[key]
+        assert spec.sends_event_name is False
+        assert len(spec.additional_fields) == 47
+        assert spec.additional_fields == INSTALLS_ADDITIONAL_FIELDS
+
+
+def test_both_installs_specs_have_a_hard_clamped_60_day_retention() -> None:
+    for key in ("installs_non_organic", "installs_retargeting"):
+        spec = REPORTS[key]
+        assert spec.retention_days == 60
+        assert spec.hard_clamp_retention is True
+        assert spec.window_column == "install_time"
+
+
+def test_in_app_events_specs_keep_warn_only_retention_unchanged() -> None:
+    for key in ("in_app_events_non_organic", "in_app_events_retargeting"):
+        assert REPORTS[key].hard_clamp_retention is False
+
+
+def test_both_installs_specs_have_column_map_none() -> None:
+    for key in ("installs_non_organic", "installs_retargeting"):
+        assert REPORTS[key].column_map is None
+
+
+def test_installs_table_callable_reads_settings_db_table_installs() -> None:
+    class _FakeSettings:
+        db_table_installs = "appsflyer_installs_fb"
+
+    for key in ("installs_non_organic", "installs_retargeting"):
+        assert REPORTS[key].table(_FakeSettings()) == "appsflyer_installs_fb"  # type: ignore[arg-type]
+
+
+def test_installs_raw_columns_has_128_entries_matching_the_column_sizing_measurement() -> None:
+    """Pinned against docs/superpowers/specs/2026-08-13-baf-11-column-sizing.md's
+    128-column installs_report/installs-retarget measurement (2026-08-13,
+    com.yesimmobile, 2026-08-11: 1,872 and 918 rows).
+    """
+    assert len(INSTALLS_RAW_COLUMNS) == 128
+    assert len(set(INSTALLS_RAW_COLUMNS)) == 128  # no duplicate raw names
+    assert "Event Value" in INSTALLS_RAW_COLUMNS
+    assert "App ID" in INSTALLS_RAW_COLUMNS
+
+
+def test_installs_insert_columns_has_no_naming_collisions() -> None:
+    spec = REPORTS["installs_non_organic"]
+    assert len(spec.insert_columns) == len(set(spec.insert_columns)) == 130  # 128 + 2 injected
+    assert "app_id" in spec.insert_columns  # the pipeline's OWN injected column
+    assert "appsflyer_app_id" in spec.insert_columns  # AppsFlyer's raw "App ID", renamed
