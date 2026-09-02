@@ -87,9 +87,24 @@ def _raw_row_for(column_map: dict[str, str]) -> dict[str, str]:
     return row
 
 
+def _installs_raw_row() -> dict[str, str]:
+    row: dict[str, str] = dict.fromkeys(INSTALLS_RAW_COLUMNS, "")
+    row.update(
+        {
+            "AppsFlyer ID": "af-id-1",
+            "Install Time": "2026-05-19 09:30:00",
+            "Event Time": "2026-05-20 10:05:00",
+            "Attributed Touch Time": "2026-05-19 09:00:00",
+        }
+    )
+    return row
+
+
 def test_insert_columns_match_transform_events_output_keys_for_every_report() -> None:
     for spec in REPORTS.values():
-        raw_row = _raw_row_for(dict(spec.column_map))
+        raw_row = (
+            _installs_raw_row() if spec.column_map is None else _raw_row_for(dict(spec.column_map))
+        )
         df = pl.DataFrame([raw_row], schema=dict.fromkeys(raw_row, pl.Utf8))
 
         rows = transform_events(

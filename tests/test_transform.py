@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import io
 import logging
 from decimal import Decimal
 from io import BytesIO
@@ -9,7 +10,7 @@ import polars as pl
 import pytest
 
 from appsflyer_pipeline.appsflyer_client import AttributionType
-from appsflyer_pipeline.reports import REPORTS
+from appsflyer_pipeline.reports import INSTALLS_RAW_COLUMNS, REPORTS
 from appsflyer_pipeline.transform import TransformError, normalize_column_name, transform_events
 
 
@@ -729,3 +730,143 @@ def test_transform_conflict_with_null_revenue_does_not_break_the_sum(
 
     assert [row["event_revenue"] for row in rows] == [Decimal("4")]
     assert "discarded event_revenue: 0" in " ".join(r.message for r in caplog.records)
+
+
+def _installs_csv_row(**overrides: str) -> str:
+    """Builds a full 128-column installs CSV (header + one row) from
+    reports.INSTALLS_RAW_COLUMNS, so this fixture can never silently drift
+    from the real column set -- every value defaults to empty (matching the
+    live measurement's mostly-empty additional_fields) except the handful
+    overridden below or via **overrides.
+    """
+    values: dict[str, str] = dict.fromkeys(INSTALLS_RAW_COLUMNS, "")
+    values.update(
+        {
+            "AppsFlyer ID": "af-installs-1",
+            "Install Time": "2026-05-19 09:30:00",
+            "Event Time": "2026-05-19 09:30:00",
+            "Attributed Touch Time": "2026-05-19 09:00:00",
+            "Event Name": "install",
+            "Media Source": "Facebook Ads",
+        }
+    )
+    values.update(overrides)
+    header = ",".join(INSTALLS_RAW_COLUMNS)
+    row = ",".join(values[c] for c in INSTALLS_RAW_COLUMNS)
+    return f"{header}\n{row}\n"
+
+
+def _installs_df(**overrides: str) -> pl.DataFrame:
+    csv_text = _installs_csv_row(**overrides)
+    return pl.read_csv(io.StringIO(csv_text), infer_schema_length=0)
+
+
+def test_transform_installs_maps_all_128_columns_via_normalization() -> None:
+    """Master spec Этап 6 acceptance criterion: all 128 columns land in the
+    row -- proven against reports.INSTALLS_RAW_COLUMNS, not a second
+    hand-typed list.
+    """
+    df = _installs_df()
+    rows = transform_events(
+        df,
+        spec=REPORTS["installs_non_organic"],
+        app_id="com.yesimmobile",
+        media_source_filter=None,
+        event_names_filter=None,
+    )
+    assert len(rows) == 1
+    assert set(rows[0]) == set(REPORTS["installs_non_organic"].insert_columns)
+    assert rows[0]["appsflyer_id"] == "af-installs-1"
+    assert rows[0]["app_id"] == "com.yesimmobile"  # the pipeline's OWN injected value
+    assert rows[0]["attribution_type"] == "non_organic"
+
+
+def test_transform_installs_renames_raw_app_id_avoiding_collision() -> None:
+    df = _installs_df(**{"App ID": "1458505230"})
+    rows = transform_events(
+        df,
+        spec=REPORTS["installs_non_organic"],
+        app_id="com.yesimmobile",
+        media_source_filter=None,
+        event_names_filter=None,
+    )
+    assert rows[0]["appsflyer_app_id"] == "1458505230"
+    assert rows[0]["app_id"] == "com.yesimmobile"  # unaffected by the raw column's value
+
+
+def test_transform_installs_raises_on_unexpected_column_set() -> None:
+    """A response missing a column (or carrying an extra, unrecognized one)
+    must fail loudly, not silently drift from the installs table's DDL --
+    the whole point of validating produced-columns against insert_columns
+    even in pass-through mode.
+    """
+    # Drop one raw column entirely -- a genuinely column-short response.
+    csv_text = _installs_csv_row()
+    header_line, row_line = csv_text.splitlines()
+    headers = header_line.split(",")
+    values = row_line.split(",")
+    drop_index = headers.index("Campaign")
+    del headers[drop_index]
+    del values[drop_index]
+    bad_csv = ",".join(headers) + "\n" + ",".join(values) + "\n"
+    df = pl.read_csv(io.StringIO(bad_csv), infer_schema_length=0)
+
+    with pytest.raises(TransformError, match="does not match the expected installs schema"):
+        transform_events(
+            df,
+            spec=REPORTS["installs_non_organic"],
+            app_id="com.yesimmobile",
+            media_source_filter=None,
+            event_names_filter=None,
+        )
+
+
+def test_transform_installs_keeps_two_rows_for_different_appsflyer_ids() -> None:
+    df = _installs_df(**{"AppsFlyer ID": "af-1"})
+    df2 = _installs_df(**{"AppsFlyer ID": "af-2"})
+    combined = pl.concat([df, df2])
+    rows = transform_events(
+        combined,
+        spec=REPORTS["installs_non_organic"],
+        app_id="com.yesimmobile",
+        media_source_filter=None,
+        event_names_filter=None,
+    )
+    assert len(rows) == 2
+
+
+def test_transform_installs_collapses_exact_repeat_of_same_appsflyer_id_and_event_time() -> None:
+    """Same key, identical row -- the existing exact-duplicate-collapse path,
+    unaffected by installs having its own key function.
+    """
+    df = _installs_df()
+    combined = pl.concat([df, df])
+    rows = transform_events(
+        combined,
+        spec=REPORTS["installs_non_organic"],
+        app_id="com.yesimmobile",
+        media_source_filter=None,
+        event_names_filter=None,
+    )
+    assert len(rows) == 1
+
+
+def test_transform_installs_key_does_not_include_event_name_or_event_value() -> None:
+    """Architecture decision 7: two rows sharing (appsflyer_id, event_time)
+    but differing ONLY in Event Name/Event Value must still collapse to one
+    (both fields are always-empty-or-near-constant for installs and
+    deliberately excluded from the key) -- this pins that the key really is
+    (appsflyer_id, event_time), not a wider tuple that happens to look right
+    on the "different AppsFlyer ID" test above.
+    """
+    df = _installs_df(**{"Event Name": "install"})
+    df2 = _installs_df(**{"Event Name": "re-engagement"})  # same appsflyer_id, event_time
+    combined = pl.concat([df, df2])
+    rows = transform_events(
+        combined,
+        spec=REPORTS["installs_non_organic"],
+        app_id="com.yesimmobile",
+        media_source_filter=None,
+        event_names_filter=None,
+    )
+    assert len(rows) == 1
