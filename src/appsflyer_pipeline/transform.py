@@ -10,7 +10,7 @@ from __future__ import annotations
 import datetime
 import logging
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
 
@@ -18,31 +18,10 @@ from appsflyer_pipeline.appsflyer_client import AttributionType
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from appsflyer_pipeline.reports import ReportSpec
+
 _TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
-
-# Raw AppsFlyer column -> target table column. Confirmed against a live API
-# response (81 raw columns) during Stage 4 — everything else AppsFlyer returns
-# (geo, device, contributors, cost, ...) is intentionally dropped.
-_COLUMN_MAP: dict[str, str] = {
-    "Event Time": "event_time",
-    "Install Time": "install_time",
-    "Attributed Touch Time": "attributed_touch_time",
-    "Event Name": "event_name",
-    "Event Revenue": "event_revenue",
-    "Media Source": "media_source",
-    "Channel": "channel",
-    "Campaign": "campaign",
-    "Campaign ID": "campaign_id",
-    "Adset": "adset",
-    "Adset ID": "adset_id",
-    "Ad": "ad",
-    "Ad ID": "ad_id",
-    "AppsFlyer ID": "appsflyer_id",
-    "Customer User ID": "customer_user_id",
-}
-
-_TIMESTAMP_COLUMNS = ("event_time", "install_time", "attributed_touch_time")
-_REQUIRED_NOT_NULL = ("event_time", "event_name", "appsflyer_id")
 
 # Raw-only column read for dedup, never persisted (BAF-11 stage 2, Q6): on the
 # unfiltered full-array stream, two real events can share
@@ -211,7 +190,7 @@ def _dedupe_rows(
 def transform_events(
     df: pl.DataFrame,
     *,
-    attribution_type: AttributionType,
+    spec: ReportSpec,
     app_id: str,
     media_source_filter: str | None,
     event_names_filter: list[str] | None,
@@ -235,8 +214,10 @@ def transform_events(
     now resolves to a single row (latest `install_time`) rather than keeping
     both — see `_dedupe_rows`.
     """
+    attribution_type = spec.attribution_type
+    column_map = spec.column_map
     missing = [
-        raw for raw in (*_COLUMN_MAP, _DEDUPE_DISCRIMINATOR_RAW_COLUMN) if raw not in df.columns
+        raw for raw in (*column_map, _DEDUPE_DISCRIMINATOR_RAW_COLUMN) if raw not in df.columns
     ]
     if missing:
         raise TransformError(
@@ -268,17 +249,17 @@ def transform_events(
 
     rows: list[dict[str, Any]] = []
     skipped_missing_required = 0
-    select_columns = [*_COLUMN_MAP, _DEDUPE_DISCRIMINATOR_RAW_COLUMN]
+    select_columns = [*column_map, _DEDUPE_DISCRIMINATOR_RAW_COLUMN]
     for raw_row in filtered.select(select_columns).iter_rows(named=True):
-        row: dict[str, Any] = {target: raw_row[raw] for raw, target in _COLUMN_MAP.items()}
+        row: dict[str, Any] = {target: raw_row[raw] for raw, target in column_map.items()}
         row[_DEDUPE_DISCRIMINATOR_ROW_KEY] = raw_row[_DEDUPE_DISCRIMINATOR_RAW_COLUMN]
-        for ts_col in _TIMESTAMP_COLUMNS:
+        for ts_col in spec.timestamp_columns:
             row[ts_col] = _parse_timestamp(row[ts_col])
         row["event_revenue"] = _parse_revenue(row["event_revenue"])
         row["attribution_type"] = attribution_type
         row["app_id"] = app_id
 
-        if any(not row[required] for required in _REQUIRED_NOT_NULL):
+        if any(not row[required] for required in spec.required_not_null):
             skipped_missing_required += 1
             continue
 
@@ -288,7 +269,7 @@ def transform_events(
         logger.warning(
             "skipped %d row(s) missing a required field (%s): attribution_type=%s app_id=%s",
             skipped_missing_required,
-            ", ".join(_REQUIRED_NOT_NULL),
+            ", ".join(spec.required_not_null),
             attribution_type,
             app_id,
         )
