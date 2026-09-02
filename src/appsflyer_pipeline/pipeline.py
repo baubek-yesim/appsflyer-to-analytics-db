@@ -65,8 +65,8 @@ def _active_retention_days() -> int:
     return min(spec.retention_days for spec in REPORTS.values())
 
 
-def _enabled_specs(settings: Settings) -> list[tuple[str, ReportSpec]]:
-    """The (REPORTS key, spec) pairs this run is allowed to fetch.
+def _enabled_specs(settings: Settings) -> list[ReportSpec]:
+    """The REPORTS entries this run is allowed to fetch.
 
     BAF-11 stage 4's opt-in gate: REPORTS registers four specs, but a run only
     touches the ones named in `settings.appsflyer_enabled_reports` (default:
@@ -80,7 +80,7 @@ def _enabled_specs(settings: Settings) -> list[tuple[str, ReportSpec]]:
     (an unknown key is silently absent here) — `_run_window` calls that first.
     """
     enabled = set(settings.appsflyer_enabled_reports)
-    return [(key, spec) for key, spec in REPORTS.items() if key in enabled]
+    return [spec for key, spec in REPORTS.items() if key in enabled]
 
 
 def _validate_enabled_reports(settings: Settings) -> None:
@@ -164,7 +164,7 @@ def _iter_work_items(
     """
     enabled_specs = _enabled_specs(settings)
     for app_id in settings.appsflyer_app_ids:
-        for _key, spec in enabled_specs:
+        for spec in enabled_specs:
             spec_start = start
             if spec.hard_clamp_retention:
                 # BAF-11 stage 4 (installs): a response past the real
@@ -398,7 +398,7 @@ def _run_window(start: datetime.date, end: datetime.date, *, dry_run: bool) -> R
         # table hasn't been provisioned yet must still run, or the opt-in gate
         # above would be pointless. cli.py's create-table/check-connection
         # scope things the other way on purpose -- see the note there.
-        for table in sorted({spec.table(settings) for _key, spec in _enabled_specs(settings)}):
+        for table in sorted({spec.table(settings) for spec in _enabled_specs(settings)}):
             status = check_connection(engine, table)
             if not status.table_exists:
                 raise PipelineError(
