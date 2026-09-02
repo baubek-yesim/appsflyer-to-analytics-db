@@ -15,6 +15,7 @@ from appsflyer_pipeline.config import Settings, get_settings
 from appsflyer_pipeline.loader import ConnectionStatus, PipelineError
 from appsflyer_pipeline.pipeline import _iter_work_items, run_backfill, run_daily
 from appsflyer_pipeline.reports import INSTALLS_RAW_COLUMNS, REPORTS, ReportSpec
+from appsflyer_pipeline.transform import transform_events
 
 SAMPLE_CSV = (
     "Attributed Touch Time,Install Time,Event Time,Event Name,Event Value,Event Revenue,"
@@ -88,6 +89,7 @@ def _installs_sample_csv() -> str:
             "Install Time": "2026-05-19 09:30:00",
             "Event Time": "2026-05-19 09:30:00",
             "Attributed Touch Time": "2026-05-19 09:00:00",
+            "Event Name": "install",
             "Media Source": "Facebook Ads",
         }
     )
@@ -900,6 +902,61 @@ def test_run_window_preflight_still_covers_an_enabled_installs_table(
 
     with pytest.raises(PipelineError, match=BASE_ENV["DB_TABLE_INSTALLS"]):
         run_daily(date=datetime.date(2026, 5, 20))
+
+
+def test_installs_transform_is_not_re_filtered_by_the_event_name_filter(
+    monkeypatch: pytest.MonkeyPatch, load_spy: list[dict[str, Any]]
+) -> None:
+    """`_process_window` must gate the client-side re-filters on the spec, the
+    same way `appsflyer_client._fetch_csv` already gates the API-side params
+    (`if spec.sends_event_name and event_names is not None`).
+
+    installs has `sends_event_name=False`, so `event_name` is never sent to the
+    API and the response legitimately carries Event Name values the filter
+    doesn't name ("install"). Passing that filter into `transform_events`
+    anyway re-filters those rows away client-side -- every installs row
+    silently dropped, and the idempotent delete-then-insert then WIPES the
+    window at exit 0. That is the exact issue-#10/#45 failure shape, reached
+    through a filter that was never meant to apply to this report.
+    """
+    _set_env(
+        monkeypatch,
+        APPSFLYER_ENABLED_REPORTS="installs_non_organic",
+        APPSFLYER_MEDIA_SOURCE="Facebook Ads",
+        APPSFLYER_EVENT_NAMES="af_purchase,af_purchase_YC",
+    )
+    monkeypatch.setattr(pipeline, "_today", lambda: datetime.date(2026, 6, 1))
+    filters: list[tuple[str | None, list[str] | None]] = []
+
+    def _spying_transform_events(
+        df: Any,
+        *,
+        spec: ReportSpec,
+        app_id: str,
+        media_source_filter: str | None,
+        event_names_filter: list[str] | None,
+    ) -> list[dict[str, Any]]:
+        filters.append((media_source_filter, event_names_filter))
+        return transform_events(
+            df,
+            spec=spec,
+            app_id=app_id,
+            media_source_filter=media_source_filter,
+            event_names_filter=event_names_filter,
+        )
+
+    monkeypatch.setattr(pipeline, "transform_events", _spying_transform_events)
+
+    with respx.mock:
+        _mock_all_ok()
+        summary = run_daily(date=datetime.date(2026, 5, 19))
+
+    assert summary.all_succeeded
+    # sends_event_name=False -> the filter is dropped; sends_media_source=True
+    # -> it still applies (and the fixture row matches it).
+    assert filters == [("Facebook Ads", None)] * len(APP_IDS)
+    assert summary.total_loaded == len(APP_IDS)  # 1 installs row per app, NOT filtered away
+    assert all(len(call["rows"]) == 1 for call in load_spy)
 
 
 def test_installs_retention_floor_is_60_not_90(monkeypatch: pytest.MonkeyPatch) -> None:

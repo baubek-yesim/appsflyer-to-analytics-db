@@ -241,12 +241,24 @@ def _process_window(
         )
         fetched_rows = raw_df.height
 
+        # Gate each client-side re-filter on the spec exactly as
+        # appsflyer_client._fetch_csv gates its API-side twin. transform's
+        # re-filter is defense in depth on top of a param the API was actually
+        # sent -- applying one the API never received isn't defense, it's a
+        # filter the report was never scoped by. installs
+        # (sends_event_name=False) legitimately returns Event Name values the
+        # filter doesn't name, and re-filtering those away would drop every
+        # row, whereupon the idempotent delete-then-insert wipes the window at
+        # exit 0 (issue #10/#45's shape). sends_media_source is True for every
+        # spec registered today, so that half is symmetry, not a live fix.
+        media_source_filter = settings.appsflyer_media_source if spec.sends_media_source else None
+        event_names_filter = settings.appsflyer_event_names if spec.sends_event_name else None
         rows: list[dict[str, Any]] = transform_events(
             raw_df,
             spec=spec,
             app_id=app_id,
-            media_source_filter=settings.appsflyer_media_source,
-            event_names_filter=settings.appsflyer_event_names,
+            media_source_filter=media_source_filter,
+            event_names_filter=event_names_filter,
         )
 
         if dry_run:
