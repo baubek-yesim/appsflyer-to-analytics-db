@@ -39,6 +39,7 @@ def _unreachable_engine() -> Engine:
         db_password="pw",
         db_name="db",
         db_table="some_table",
+        db_table_installs="some_installs_table",
         appsflyer_api_token="token",
         appsflyer_app_ids=["id1"],
         _env_file=None,

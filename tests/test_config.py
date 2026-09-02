@@ -14,6 +14,7 @@ BASE_ENV = {
     "DB_PASSWORD": "secret",
     "DB_NAME": "statistics",
     "DB_TABLE": "appsflyer_events",
+    "DB_TABLE_INSTALLS": "appsflyer_installs_events",
     "APPSFLYER_API_TOKEN": "token",
     "APPSFLYER_APP_IDS": "id1,id2",
 }
@@ -47,6 +48,17 @@ def test_loads_required_fields_from_env(monkeypatch: pytest.MonkeyPatch) -> None
     assert settings.db_host == "db.example.com"
     assert settings.db_port == 3306
     assert settings.appsflyer_api_token == "token"
+
+
+def test_loads_db_table_installs_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _settings(monkeypatch, DB_TABLE_INSTALLS="appsflyer_installs_fb")
+    assert settings.db_table_installs == "appsflyer_installs_fb"
+
+
+@pytest.mark.parametrize("raw", ["", "   "])
+def test_empty_db_table_installs_rejected(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+    with pytest.raises(ValidationError):
+        _settings(monkeypatch, DB_TABLE_INSTALLS=raw)
 
 
 def test_splits_csv_app_ids(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -114,6 +126,7 @@ def test_empty_csv_list_rejected(monkeypatch: pytest.MonkeyPatch, field: str, ra
         "DB_USER",
         "DB_NAME",
         "DB_TABLE",
+        "DB_TABLE_INSTALLS",
         "APPSFLYER_API_TOKEN",
         "APPSFLYER_MEDIA_SOURCE",
     ],

@@ -23,6 +23,7 @@ UNREACHABLE_ENV = {
     "DB_PASSWORD": "pw",
     "DB_NAME": "db",
     "DB_TABLE": "some_table",
+    "DB_TABLE_INSTALLS": "some_installs_table",
     "APPSFLYER_API_TOKEN": "token",
     "APPSFLYER_APP_IDS": "id1",
 }
@@ -161,6 +162,7 @@ def test_format_validation_error_never_includes_input_values(
     for key in (
         "DB_NAME",
         "DB_TABLE",
+        "DB_TABLE_INSTALLS",
         "APPSFLYER_API_TOKEN",
         "APPSFLYER_APP_IDS",
         "APPSFLYER_MEDIA_SOURCE",

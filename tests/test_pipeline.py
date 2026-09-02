@@ -32,6 +32,7 @@ BASE_ENV = {
     "DB_PASSWORD": "secret",
     "DB_NAME": "statistics",
     "DB_TABLE": "appsflyer_events",
+    "DB_TABLE_INSTALLS": "appsflyer_installs_events",
     "APPSFLYER_API_TOKEN": "token",
     "APPSFLYER_APP_IDS": "app1,app2",
 }

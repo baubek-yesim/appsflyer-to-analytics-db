@@ -50,6 +50,13 @@ class Settings(BaseSettings):
     db_password: str
     db_name: RequiredStr
     db_table: RequiredStr
+    # BAF-11 stage 4: installs/installs_retarget get their own table (ticket
+    # decision #2 — in-app-events stays on the same 17-column schema/table;
+    # installs' 128-column full-fields shape is a new table, not a migration
+    # of the existing one). Same validation as db_table: a truncated
+    # EnvironmentFile line must fail startup loudly (issue #29), not degrade
+    # to writing installs data into an empty-string table name.
+    db_table_installs: RequiredStr
 
     # AppsFlyer Pull API
     appsflyer_api_token: RequiredStr
