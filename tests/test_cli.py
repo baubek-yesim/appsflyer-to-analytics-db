@@ -306,6 +306,33 @@ def test_backfill_partial_failure_exits_one_with_fail_line(
     assert "FAIL" in result.output
 
 
+@respx.mock
+def test_summary_lines_name_the_report_family(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BAF-11 stage 4: REPORTS can hold several specs per
+    (app_id, attribution_type), so an OK/FAIL line keyed only on those two is
+    ambiguous. Both line shapes must carry the report family
+    (`[non_organic/in_app_events]`).
+    """
+    _set_cli_env(monkeypatch)
+    respx.get(_af_url("app1", "non_organic")).mock(
+        return_value=httpx.Response(200, text=SAMPLE_CSV)
+    )
+    respx.get(_af_url("app1", "retargeting")).mock(return_value=httpx.Response(401, text="nope"))
+
+    result = runner.invoke(
+        app,
+        ["backfill", "--start-date", "2026-05-20", "--end-date", "2026-05-20", "--dry-run"],
+    )
+
+    get_settings.cache_clear()
+    assert result.exit_code == 1
+    assert (
+        "OK   app1 [non_organic/in_app_events] 2026-05-20..2026-05-20: fetched=1 loaded=1"
+        in result.output
+    )
+    assert "FAIL app1 [retargeting/in_app_events] 2026-05-20..2026-05-20: " in result.output
+
+
 def test_backfill_invalid_start_date_fails_fast(monkeypatch: pytest.MonkeyPatch) -> None:
     """Never touches the network — invalid date is caught before run_backfill()."""
     _set_cli_env(monkeypatch)

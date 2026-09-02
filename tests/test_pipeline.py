@@ -910,6 +910,95 @@ def test_run_window_preflight_still_covers_an_enabled_installs_table(
         run_daily(date=datetime.date(2026, 5, 20))
 
 
+def test_window_results_name_their_report_family(
+    monkeypatch: pytest.MonkeyPatch, load_spy: list[dict[str, Any]]
+) -> None:
+    """With four specs in REPORTS, (app_id, attribution_type, window) no longer
+    identifies a result: in-app-events and installs both produce a
+    non_organic result for the same app and the same dates. WindowResult must
+    carry which report family it is about, or an operator reading an OK/FAIL
+    line cannot tell which of two rows it names.
+    """
+    _set_env(monkeypatch, APPSFLYER_ENABLED_REPORTS=ALL_REPORTS_ENABLED)
+    monkeypatch.setattr(pipeline, "_today", lambda: datetime.date(2026, 6, 1))
+
+    with respx.mock:
+        _mock_all_ok()
+        summary = run_daily(date=datetime.date(2026, 5, 19), dry_run=True)
+
+    assert {r.report for r in summary.results} == {"in_app_events", "installs"}
+    # The pair that used to be indistinguishable: one app, one attribution
+    # type, one window -> two results, told apart only by `report`.
+    same_unit = [
+        r for r in summary.results if r.app_id == "app1" and r.attribution_type == "non_organic"
+    ]
+    assert sorted(r.report for r in same_unit) == ["in_app_events", "installs"]
+
+
+def test_failed_window_result_names_its_report_family(
+    monkeypatch: pytest.MonkeyPatch, load_spy: list[dict[str, Any]]
+) -> None:
+    """The exception path constructs its own WindowResult -- it must set
+    `report` too, or a FAIL line is exactly the one that can't be traced back.
+    """
+    _set_env(monkeypatch, APPSFLYER_ENABLED_REPORTS=ALL_REPORTS_ENABLED)
+    monkeypatch.setattr(pipeline, "_today", lambda: datetime.date(2026, 6, 1))
+
+    with respx.mock:
+        _mock_all_ok()
+        respx.get(_url_for_spec(REPORTS["installs_non_organic"], "app1")).mock(
+            return_value=httpx.Response(401, text="nope")
+        )
+        summary = run_daily(date=datetime.date(2026, 5, 19), dry_run=True)
+
+    assert len(summary.failed) == 1
+    assert summary.failed[0].report == "installs"
+    assert summary.failed[0].app_id == "app1"
+
+
+def test_process_window_logs_name_the_report_family(
+    monkeypatch: pytest.MonkeyPatch,
+    load_spy: list[dict[str, Any]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """journald is where an operator actually reads this: the fetching/done
+    lines must say which report family, for the same reason the summary does.
+    """
+    _set_env(monkeypatch, APPSFLYER_ENABLED_REPORTS="installs_non_organic")
+    monkeypatch.setattr(pipeline, "_today", lambda: datetime.date(2026, 6, 1))
+
+    with caplog.at_level(logging.INFO, logger="appsflyer_pipeline.pipeline"), respx.mock:
+        _mock_all_ok()
+        run_daily(date=datetime.date(2026, 5, 19), dry_run=True)
+
+    fetching = [r for r in caplog.records if r.message.startswith("fetching ")]
+    done = [r for r in caplog.records if r.message.startswith("done ")]
+    assert len(fetching) == len(APP_IDS)
+    assert len(done) == len(APP_IDS)
+    assert all("report=installs" in r.message for r in fetching)
+    assert all("report=installs" in r.message for r in done)
+
+
+def test_process_window_error_log_names_the_report_family(
+    monkeypatch: pytest.MonkeyPatch,
+    load_spy: list[dict[str, Any]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _set_env(monkeypatch, APPSFLYER_ENABLED_REPORTS="installs_non_organic")
+    monkeypatch.setattr(pipeline, "_today", lambda: datetime.date(2026, 6, 1))
+
+    with caplog.at_level(logging.ERROR, logger="appsflyer_pipeline.pipeline"), respx.mock:
+        _mock_all_ok()
+        respx.get(_url_for_spec(REPORTS["installs_non_organic"], "app1")).mock(
+            return_value=httpx.Response(401, text="nope")
+        )
+        run_daily(date=datetime.date(2026, 5, 19), dry_run=True)
+
+    failed = [r for r in caplog.records if r.message.startswith("failed ")]
+    assert len(failed) == 1
+    assert "report=installs" in failed[0].message
+
+
 def test_run_daily_loads_installs_rows_into_the_installs_table_end_to_end(
     monkeypatch: pytest.MonkeyPatch, load_spy: list[dict[str, Any]]
 ) -> None:

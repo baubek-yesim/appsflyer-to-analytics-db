@@ -139,17 +139,16 @@ def _get_settings_or_exit() -> Settings:
 
 
 def _print_summary(summary: RunSummary) -> None:
+    # The bracketed field carries BOTH attribution type and report family
+    # (BAF-11 stage 4): REPORTS can hold several specs per
+    # (app_id, attribution_type), so without `r.report` two lines of a run
+    # would be textually identical and name different rows.
     for r in summary.results:
+        unit = f"{r.app_id} [{r.attribution_type}/{r.report}] {r.start_date}..{r.end_date}"
         if r.succeeded:
-            typer.echo(
-                f"  OK   {r.app_id} [{r.attribution_type}] {r.start_date}..{r.end_date}: "
-                f"fetched={r.fetched_rows} loaded={r.loaded_rows}"
-            )
+            typer.echo(f"  OK   {unit}: fetched={r.fetched_rows} loaded={r.loaded_rows}")
         else:
-            typer.echo(
-                f"  FAIL {r.app_id} [{r.attribution_type}] {r.start_date}..{r.end_date}: {r.error}",
-                err=True,
-            )
+            typer.echo(f"  FAIL {unit}: {r.error}", err=True)
     verb = "Would load" if summary.dry_run else "Loaded"
     typer.echo(
         f"{verb} {summary.total_loaded} rows across "

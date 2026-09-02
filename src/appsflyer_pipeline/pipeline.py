@@ -101,6 +101,11 @@ def _validate_enabled_reports(settings: Settings) -> None:
 class WindowResult:
     app_id: str
     attribution_type: AttributionType
+    # ReportSpec.name ("in_app_events" / "installs") -- BAF-11 stage 4. REPORTS
+    # can hold several specs sharing one (app_id, attribution_type), so those
+    # two no longer identify a result: an operator reading an OK/FAIL line or a
+    # journald log line otherwise cannot tell which report family it is about.
+    report: str
     start_date: datetime.date
     end_date: datetime.date
     fetched_rows: int
@@ -221,8 +226,9 @@ def _process_window(
     """
     attribution_type = spec.attribution_type
     logger.info(
-        "fetching app_id=%s attribution_type=%s window=[%s, %s]",
+        "fetching app_id=%s report=%s attribution_type=%s window=[%s, %s]",
         app_id,
+        spec.name,
         attribution_type,
         start_date,
         end_date,
@@ -275,8 +281,9 @@ def _process_window(
             )
     except (AppsFlyerAPIError, TransformError, PipelineError) as exc:
         logger.error(
-            "failed app_id=%s attribution_type=%s window=[%s, %s]: %s",
+            "failed app_id=%s report=%s attribution_type=%s window=[%s, %s]: %s",
             app_id,
+            spec.name,
             attribution_type,
             start_date,
             end_date,
@@ -285,6 +292,7 @@ def _process_window(
         return WindowResult(
             app_id=app_id,
             attribution_type=attribution_type,
+            report=spec.name,
             start_date=start_date,
             end_date=end_date,
             fetched_rows=0,
@@ -293,8 +301,9 @@ def _process_window(
         )
 
     logger.info(
-        "done app_id=%s attribution_type=%s window=[%s, %s] fetched=%d loaded=%d",
+        "done app_id=%s report=%s attribution_type=%s window=[%s, %s] fetched=%d loaded=%d",
         app_id,
+        spec.name,
         attribution_type,
         start_date,
         end_date,
@@ -304,6 +313,7 @@ def _process_window(
     return WindowResult(
         app_id=app_id,
         attribution_type=attribution_type,
+        report=spec.name,
         start_date=start_date,
         end_date=end_date,
         fetched_rows=fetched_rows,
