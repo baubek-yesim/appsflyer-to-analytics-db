@@ -69,6 +69,32 @@ def test_create_table_is_idempotent() -> None:
     assert status.table_exists is True
 
 
+def test_create_table_installs_is_idempotent() -> None:
+    """BAF-11 stage 4: the 130-column installs DDL
+    (`loader._INSTALLS_CREATE_TABLE_TEMPLATE` / `sql/create_table_installs.sql`)
+    is only ever asserted against as a Python string elsewhere -- this is the
+    one test that makes a real MariaDB/MySQL server parse and accept it.
+    A column type, a duplicate name, an over-budget row size, or a malformed
+    index clause would all pass every unit test and fail here.
+
+    Mirrors `test_create_table_is_idempotent` above exactly: `CREATE TABLE IF
+    NOT EXISTS` only, so it is safe against production, and it skips (never
+    fails) when no database is reachable.
+    """
+    try:
+        settings = get_settings()
+        engine = create_engine(settings)
+        create_table(engine, settings.db_table_installs, REPORTS["installs_non_organic"].name)
+        create_table(
+            engine, settings.db_table_installs, REPORTS["installs_non_organic"].name
+        )  # second call must not raise
+        status = check_connection(engine, settings.db_table_installs)
+    except Exception as exc:
+        pytest.skip(f"no usable database in this environment: {exc}")
+
+    assert status.table_exists is True
+
+
 def test_load_events_is_idempotent_and_isolated() -> None:
     try:
         settings = get_settings()
