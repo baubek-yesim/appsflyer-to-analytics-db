@@ -64,6 +64,39 @@ def _active_retention_days() -> int:
     return min(spec.retention_days for spec in REPORTS.values())
 
 
+def _enabled_specs(settings: Settings) -> list[tuple[str, ReportSpec]]:
+    """The (REPORTS key, spec) pairs this run is allowed to fetch.
+
+    BAF-11 stage 4's opt-in gate: REPORTS registers four specs, but a run only
+    touches the ones named in `settings.appsflyer_enabled_reports` (default:
+    the two in-app-events specs). That is what keeps installs out of the
+    deployed scheduled timer until the Этап 9 cutover — see this stage's plan,
+    "Out of scope". Registry order is preserved, not the env var's order, so
+    the work order a run produces doesn't depend on how an operator typed the
+    list.
+
+    Assumes the keys have already been validated by `_validate_enabled_reports`
+    (an unknown key is silently absent here) — `_run_window` calls that first.
+    """
+    enabled = set(settings.appsflyer_enabled_reports)
+    return [(key, spec) for key, spec in REPORTS.items() if key in enabled]
+
+
+def _validate_enabled_reports(settings: Settings) -> None:
+    """Fail loudly on a typo'd APPSFLYER_ENABLED_REPORTS key.
+
+    Same fail-loud shape as the missing-table preflight below: an unrecognized
+    key would otherwise silently drop its report from the run and exit 0,
+    which for a scheduled job is indistinguishable from "there was no data".
+    """
+    unknown = sorted(key for key in settings.appsflyer_enabled_reports if key not in REPORTS)
+    if unknown:
+        raise PipelineError(
+            f"APPSFLYER_ENABLED_REPORTS names unknown report(s): {', '.join(unknown)} — "
+            f"valid keys are: {', '.join(REPORTS)}"
+        )
+
+
 @dataclass(frozen=True)
 class WindowResult:
     app_id: str
@@ -108,7 +141,12 @@ class RunSummary:
 def _iter_work_items(
     settings: Settings, start: datetime.date, end: datetime.date
 ) -> Iterator[tuple[ReportSpec, str, datetime.date, datetime.date]]:
-    """(report x app_id x <=chunk_days chunk) for the [start, end] window.
+    """(enabled report x app_id x <=chunk_days chunk) for the [start, end] window.
+
+    Only the REPORTS entries named in `settings.appsflyer_enabled_reports` are
+    yielded (BAF-11 stage 4's opt-in gate — see `_enabled_specs`); a registered
+    but disabled spec produces no work at all, which is how installs stays out
+    of the deployed scheduled timer.
 
     Mostly pure -- the one exception (BAF-11 stage 4) is `spec.hard_clamp_retention`
     specs, which read `_today()` to clamp their effective start date up to the
@@ -118,8 +156,9 @@ def _iter_work_items(
     nesting -- see the Stage 3 plan's Architecture decision 4 for why it
     wasn't reordered to match the master spec's "report x app_id" prose.
     """
+    enabled_specs = _enabled_specs(settings)
     for app_id in settings.appsflyer_app_ids:
-        for spec in REPORTS.values():
+        for _key, spec in enabled_specs:
             spec_start = start
             if spec.hard_clamp_retention:
                 # BAF-11 stage 4 (installs): a response past the real
@@ -319,11 +358,19 @@ def _log_filter_mode(settings: Settings) -> None:
 def _run_window(start: datetime.date, end: datetime.date, *, dry_run: bool) -> RunSummary:
     """Shared core for run_backfill/run_daily: preflight, then a sequential loop."""
     settings = get_settings()
+    # Before the preflight and before any network call: a typo'd
+    # APPSFLYER_ENABLED_REPORTS key must abort the run, not silently no-op.
+    _validate_enabled_reports(settings)
     engine = create_engine(settings)
     _log_filter_mode(settings)
 
     if not dry_run:
-        for table in sorted({spec.table(settings) for spec in REPORTS.values()}):
+        # ENABLED specs only, deliberately NOT every registered spec: on the
+        # default (in-app-events-only) config a fresh deploy where the installs
+        # table hasn't been provisioned yet must still run, or the opt-in gate
+        # above would be pointless. cli.py's create-table/check-connection
+        # scope things the other way on purpose -- see the note there.
+        for table in sorted({spec.table(settings) for _key, spec in _enabled_specs(settings)}):
             status = check_connection(engine, table)
             if not status.table_exists:
                 raise PipelineError(

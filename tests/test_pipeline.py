@@ -38,6 +38,11 @@ BASE_ENV = {
 }
 APP_IDS = ("app1", "app2")
 ATTRIBUTION_TYPES = ("non_organic", "retargeting")
+# BAF-11 stage 4: REPORTS holds four specs, but only these two are eligible to
+# run unless APPSFLYER_ENABLED_REPORTS says otherwise -- installs must not be
+# reachable by the deployed scheduled timer before the Этап 9 cutover.
+DEFAULT_ENABLED_REPORTS = ("in_app_events_non_organic", "in_app_events_retargeting")
+ALL_REPORTS_ENABLED = ",".join(REPORTS)
 
 
 # Optional keys with no default (BAF-11 stage 1 made the two filters optional):
@@ -51,6 +56,7 @@ _OPTIONAL_ENV_KEYS = (
     "APPSFLYER_CHUNK_DAYS",
     "APPSFLYER_EVENT_TIME_FROM",
     "APPSFLYER_EVENT_TIME_TO",
+    "APPSFLYER_ENABLED_REPORTS",
 )
 
 
@@ -163,8 +169,11 @@ def test_iter_work_items_yields_expected_matrix(monkeypatch: pytest.MonkeyPatch)
     per-series chunk count silently doubles. The window is deliberately
     pinned recent (within installs' 60-day hard-clamp floor) so installs'
     clamp is a no-op here and the cross-REPORTS `len(items)` equality holds.
+    Every spec is opted in explicitly (APPSFLYER_ENABLED_REPORTS): the default
+    enables only the two in-app-events specs, so without this the matrix this
+    test is about would never include installs at all.
     """
-    _set_env(monkeypatch)
+    _set_env(monkeypatch, APPSFLYER_ENABLED_REPORTS=ALL_REPORTS_ENABLED)
     settings = get_settings()
     fixed_today = datetime.date(2026, 6, 1)
     monkeypatch.setattr(pipeline, "_today", lambda: fixed_today)
@@ -502,10 +511,10 @@ def test_run_daily_lookback_widens_default_window(
         r.start_date == expected_start and r.end_date == expected_end for r in summary.results
     )
     # 3 days <= 31 -> still exactly one chunk (one report download) per combo: no extra quota.
-    # BAF-11 stage 4: REPORTS grew from 2 to 4 specs (Architecture decision 5)
-    # -- this 3-day window is well within installs' 60-day hard-clamp floor
-    # too, so all four specs contribute one unclamped chunk each.
-    assert len(summary.results) == len(APP_IDS) * len(REPORTS)
+    # BAF-11 stage 4: REPORTS grew from 2 to 4 specs (Architecture decision 5),
+    # but only the two DEFAULT_ENABLED_REPORTS run without an explicit
+    # APPSFLYER_ENABLED_REPORTS opt-in, so a default run is still 2 specs.
+    assert len(summary.results) == len(APP_IDS) * len(DEFAULT_ENABLED_REPORTS)
 
 
 def test_run_daily_explicit_date_ignores_lookback(
@@ -587,13 +596,15 @@ def test_run_daily_date_exactly_at_floor_does_not_warn(
     stay silent -- a `<=` regression would spam journald on every scheduled run.
 
     This date (2026-04-10) is also before installs' own 60-day floor
-    (2026-05-10), so `_iter_work_items` legitimately logs its own "skipping
-    installs" warning for it (BAF-11 stage 4, Architecture decision 3) -- an
-    unavoidable consequence of the in-app-events 90-day boundary always being
-    earlier than installs' 60-day one, not a regression. This assertion is
-    narrowed to `_warn_if_before_retention_floor`'s own message text
-    ("Proceeding anyway", unique to it) so it stays scoped to the
-    in-app-events boundary behavior it's actually pinning.
+    (2026-05-10), so `_iter_work_items` would log its own "skipping installs"
+    warning for it whenever installs is enabled (BAF-11 stage 4, Architecture
+    decision 3) -- an unavoidable consequence of the in-app-events 90-day
+    boundary always being earlier than installs' 60-day one, not a regression.
+    (It doesn't fire in this particular run, which uses the default
+    in-app-events-only APPSFLYER_ENABLED_REPORTS.) The assertion stays narrowed
+    to `_warn_if_before_retention_floor`'s own message text ("Proceeding
+    anyway", unique to it) so it remains scoped to the in-app-events boundary
+    behavior it's actually pinning, regardless of which reports are enabled.
     """
     _set_env(monkeypatch)
     monkeypatch.setattr(pipeline, "_today", lambda: datetime.date(2026, 7, 9))
@@ -698,7 +709,7 @@ def test_iter_work_items_hard_clamps_installs_but_not_in_app_events(
     (hard_clamp_retention=False, 90 days) keeps warn-and-proceed -- its
     chunks still start at the caller's requested start regardless.
     """
-    _set_env(monkeypatch)
+    _set_env(monkeypatch, APPSFLYER_ENABLED_REPORTS=ALL_REPORTS_ENABLED)
     settings = get_settings()
     fixed_today = datetime.date(2026, 8, 31)
     monkeypatch.setattr(pipeline, "_today", lambda: fixed_today)
@@ -719,7 +730,7 @@ def test_iter_work_items_hard_clamps_installs_but_not_in_app_events(
 def test_iter_work_items_skips_installs_entirely_when_window_is_fully_before_the_floor(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    _set_env(monkeypatch)
+    _set_env(monkeypatch, APPSFLYER_ENABLED_REPORTS=ALL_REPORTS_ENABLED)
     settings = get_settings()
     fixed_today = datetime.date(2026, 8, 31)
     monkeypatch.setattr(pipeline, "_today", lambda: fixed_today)
@@ -783,8 +794,116 @@ def test_run_backfill_default_window_uses_max_retention_days_not_the_cross_repor
     assert captured["end"] == expected_end
 
 
-def test_installs_retention_floor_is_60_not_90(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_iter_work_items_skips_installs_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The opt-in gate: with no APPSFLYER_ENABLED_REPORTS set, only the two
+    in-app-events specs are eligible. This is what keeps installs out of the
+    live scheduled `daily` timer until the Этап 9 cutover decision -- the
+    plan's Non-Goal ("this plan only makes installs *available* to run
+    manually; nothing here changes what the deployed systemd timer pulls").
+    The window is pinned recent so installs' own 60-day hard clamp cannot be
+    what excludes it -- the gate has to be.
+    """
     _set_env(monkeypatch)
+    settings = get_settings()
+    fixed_today = datetime.date(2026, 8, 31)
+    monkeypatch.setattr(pipeline, "_today", lambda: fixed_today)
+    start = fixed_today - datetime.timedelta(days=3)
+    end = fixed_today - datetime.timedelta(days=1)
+
+    items = list(_iter_work_items(settings, start, end))
+
+    assert {spec.name for spec, _, _, _ in items} == {"in_app_events"}
+    assert len(items) == len(APP_IDS) * len(DEFAULT_ENABLED_REPORTS)
+
+
+def test_iter_work_items_runs_only_the_reports_named_in_enabled_reports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit opt-in narrows to exactly the named keys -- installs only,
+    with in-app-events excluded, is the shape of a manual installs-only run.
+    """
+    _set_env(monkeypatch, APPSFLYER_ENABLED_REPORTS="installs_non_organic")
+    settings = get_settings()
+    fixed_today = datetime.date(2026, 8, 31)
+    monkeypatch.setattr(pipeline, "_today", lambda: fixed_today)
+    day = fixed_today - datetime.timedelta(days=1)
+
+    items = list(_iter_work_items(settings, day, day))
+
+    assert {spec.name for spec, _, _, _ in items} == {"installs"}
+    assert {spec.attribution_type for spec, _, _, _ in items} == {"non_organic"}
+    assert len(items) == len(APP_IDS)
+
+
+def test_run_window_rejects_an_unknown_enabled_report_key(
+    monkeypatch: pytest.MonkeyPatch, load_spy: list[dict[str, Any]]
+) -> None:
+    """A typo must fail the run loudly, not silently no-op into fetching
+    nothing -- the same fail-loud treatment the missing-table preflight gets.
+    The check runs before the preflight and before any network call, so no
+    respx mocks are needed here: reaching one would itself be the bug.
+    """
+    _set_env(monkeypatch, APPSFLYER_ENABLED_REPORTS="in_app_events_non_organic,instals_retargeting")
+
+    with pytest.raises(PipelineError, match="instals_retargeting"):
+        run_daily(date=datetime.date(2026, 5, 20), dry_run=True)
+
+    assert load_spy == []
+
+
+def test_run_window_preflights_only_the_enabled_reports_tables(
+    monkeypatch: pytest.MonkeyPatch, load_spy: list[dict[str, Any]]
+) -> None:
+    """A fresh deploy on the default (in-app-events-only) config must not abort
+    the whole run because the installs table hasn't been provisioned yet --
+    that would defeat the point of the gate. Only enabled specs' tables are
+    checked.
+    """
+    _set_env(monkeypatch)
+    checked: list[str] = []
+
+    def _fake_check_connection(engine: object, table_name: str) -> ConnectionStatus:
+        checked.append(table_name)
+        return ConnectionStatus(
+            server_version="test",
+            table_exists=table_name != BASE_ENV["DB_TABLE_INSTALLS"],
+            row_count=0,
+        )
+
+    monkeypatch.setattr(pipeline, "check_connection", _fake_check_connection)
+
+    with respx.mock:
+        _mock_all_ok()
+        summary = run_daily(date=datetime.date(2026, 5, 20))
+
+    assert checked == [BASE_ENV["DB_TABLE"]]  # installs' table never consulted
+    assert summary.all_succeeded
+
+
+def test_run_window_preflight_still_covers_an_enabled_installs_table(
+    monkeypatch: pytest.MonkeyPatch, load_spy: list[dict[str, Any]]
+) -> None:
+    """The narrowed preflight must not become a no-op for installs: once an
+    operator opts installs in, its missing table has to abort the run exactly
+    like in-app-events' does.
+    """
+    _set_env(monkeypatch, APPSFLYER_ENABLED_REPORTS=ALL_REPORTS_ENABLED)
+    monkeypatch.setattr(
+        pipeline,
+        "check_connection",
+        lambda engine, table_name: ConnectionStatus(
+            server_version="test",
+            table_exists=table_name != BASE_ENV["DB_TABLE_INSTALLS"],
+            row_count=0,
+        ),
+    )
+
+    with pytest.raises(PipelineError, match=BASE_ENV["DB_TABLE_INSTALLS"]):
+        run_daily(date=datetime.date(2026, 5, 20))
+
+
+def test_installs_retention_floor_is_60_not_90(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_env(monkeypatch, APPSFLYER_ENABLED_REPORTS=ALL_REPORTS_ENABLED)
     settings = get_settings()
     fixed_today = datetime.date(2026, 8, 31)
     monkeypatch.setattr(pipeline, "_today", lambda: fixed_today)

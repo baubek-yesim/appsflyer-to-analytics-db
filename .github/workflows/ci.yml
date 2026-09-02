@@ -51,6 +51,13 @@ jobs:
           DB_TABLE_INSTALLS: appsflyer_installs_fb
           APPSFLYER_API_TOKEN: test-token
           APPSFLYER_APP_IDS: id1458505230
+          # APPSFLYER_ENABLED_REPORTS is deliberately NOT set here either
+          # (BAF-11 stage 4): its default already keeps installs out of a run,
+          # and the tests that need installs enabled set it themselves — an
+          # ambient value would mask a regression in that default. Setting it
+          # to include installs_non_organic,installs_retargeting is how an
+          # operator manually opts a run into pulling installs; the deployed
+          # timer keeps the default until the real cutover decision.
           # APPSFLYER_MEDIA_SOURCE / APPSFLYER_EVENT_NAMES are deliberately NOT
           # set here (BAF-11 stage 1). The integration tests never read them, and
           # an ambient value would leak into the unit tests that assert the

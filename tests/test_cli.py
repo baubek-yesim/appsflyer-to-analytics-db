@@ -110,6 +110,53 @@ def test_create_table_success_reports_ready(monkeypatch: pytest.MonkeyPatch) -> 
     assert result.output.count("is ready.") == 2  # BAF-11 stage 4: two distinct tables now
 
 
+def test_create_table_covers_disabled_reports_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The deliberate asymmetry documented at the top of cli.py: `create-table`
+    provisions EVERY registered report's table, including installs', even
+    though APPSFLYER_ENABLED_REPORTS is left at its in-app-events-only default
+    and so no run would fetch installs. Provisioning is inert; fetching spends
+    quota and writes rows.
+    """
+    _set_cli_env(monkeypatch)
+    created: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        cli,
+        "create_table",
+        lambda engine, table_name, report_name: created.append((table_name, report_name)),
+    )
+
+    result = runner.invoke(app, ["create-table"])
+
+    get_settings.cache_clear()
+    assert result.exit_code == 0
+    assert sorted(created) == sorted(
+        [
+            (CLI_ENV["DB_TABLE"], "in_app_events"),
+            (CLI_ENV["DB_TABLE_INSTALLS"], "installs"),
+        ]
+    )
+
+
+def test_check_connection_covers_disabled_reports_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same asymmetry, read-only half: an operator must be able to verify the
+    installs table exists without opting a run into pulling installs.
+    """
+    _set_cli_env(monkeypatch)
+    checked: list[str] = []
+
+    def _fake_check_connection(engine: object, table_name: str) -> ConnectionStatus:
+        checked.append(table_name)
+        return ConnectionStatus(server_version="8.0.35", table_exists=True, row_count=0)
+
+    monkeypatch.setattr(cli, "check_connection", _fake_check_connection)
+
+    result = runner.invoke(app, ["check-connection"])
+
+    get_settings.cache_clear()
+    assert result.exit_code == 0
+    assert sorted(checked) == sorted([CLI_ENV["DB_TABLE"], CLI_ENV["DB_TABLE_INSTALLS"]])
+
+
 def test_create_table_reports_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_cli_env(monkeypatch)
 

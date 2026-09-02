@@ -21,6 +21,14 @@ from appsflyer_pipeline.logging_config import configure_logging
 from appsflyer_pipeline.pipeline import RunSummary, run_backfill, run_daily
 from appsflyer_pipeline.reports import REPORTS
 
+# DELIBERATE ASYMMETRY, do not "fix" this to match pipeline._iter_work_items:
+# `check-connection`/`create-table` below iterate EVERY entry in REPORTS,
+# ignoring `settings.appsflyer_enabled_reports`, while a backfill/daily run
+# only touches the enabled ones (BAF-11 stage 4's opt-in gate). That is the
+# point: an operator must be able to provision and verify the installs table
+# ahead of an eventual real Этап 9 cutover without that act, by itself,
+# starting to pull installs data through the deployed timer. Provisioning a
+# table is inert; fetching a report spends AppsFlyer quota and writes rows.
 app = typer.Typer(
     name="appsflyer-pipeline",
     help="Load AppsFlyer Pull API purchase events into the analytics MariaDB (BAF-2).",

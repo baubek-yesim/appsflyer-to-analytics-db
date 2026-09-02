@@ -73,6 +73,23 @@ class Settings(BaseSettings):
         "id1458505230",
     ]
 
+    # Which entries of reports.REPORTS a run is allowed to fetch (BAF-11 stage
+    # 4). REPORTS registers four specs, but only the two in-app-events ones are
+    # eligible by default: the installs specs are *available* to run — an
+    # operator opts a run in by naming them here, e.g.
+    # APPSFLYER_ENABLED_REPORTS=installs_non_organic,installs_retargeting — but
+    # must NOT be reachable by the deployed scheduled `daily` timer until the
+    # Этап 9 cutover decision (this stage's plan, "Out of scope"). Keys not in
+    # REPORTS are rejected at run time by pipeline._run_window rather than here:
+    # config.py deliberately imports nothing from the package (same reason
+    # MAX_RETENTION_DAYS is a literal above), so it cannot see the registry.
+    # min_length=1 for the usual issue-#9 reason: a truncated EnvironmentFile
+    # line must abort startup, not degrade to a run that fetches nothing.
+    appsflyer_enabled_reports: Annotated[CsvList, Field(min_length=1)] = [
+        "in_app_events_non_organic",
+        "in_app_events_retargeting",
+    ]
+
     # Run parameters — three-valued since BAF-11 stage 1:
     #   unset          -> no filter at all; the param never reaches the API and
     #                     transform keeps every row (the full raw export)
@@ -131,7 +148,9 @@ class Settings(BaseSettings):
     # startup loudly, but a valid-but-wrong one cannot be caught client-side.
     appsflyer_timezone: RequiredStr | None = None
 
-    @field_validator("appsflyer_app_ids", "appsflyer_event_names", mode="before")
+    @field_validator(
+        "appsflyer_app_ids", "appsflyer_event_names", "appsflyer_enabled_reports", mode="before"
+    )
     @classmethod
     def _parse_csv_fields(cls, value: object) -> object:
         return _split_csv(value)

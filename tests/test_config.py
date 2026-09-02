@@ -31,6 +31,7 @@ _OPTIONAL_ENV_KEYS = (
     "APPSFLYER_CHUNK_DAYS",
     "APPSFLYER_EVENT_TIME_FROM",
     "APPSFLYER_EVENT_TIME_TO",
+    "APPSFLYER_ENABLED_REPORTS",
 )
 
 
@@ -59,6 +60,36 @@ def test_loads_db_table_installs_from_env(monkeypatch: pytest.MonkeyPatch) -> No
 def test_empty_db_table_installs_rejected(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
     with pytest.raises(ValidationError):
         _settings(monkeypatch, DB_TABLE_INSTALLS=raw)
+
+
+def test_enabled_reports_defaults_to_in_app_events_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BAF-11 stage 4: REPORTS holds four specs, but only the two in-app-events
+    ones may run by default. installs is available to run manually (an operator
+    opts a run in via APPSFLYER_ENABLED_REPORTS) but must NOT be reachable by
+    the deployed scheduled timer until the Этап 9 cutover decision.
+    """
+    settings = _settings(monkeypatch)
+    assert settings.appsflyer_enabled_reports == [
+        "in_app_events_non_organic",
+        "in_app_events_retargeting",
+    ]
+
+
+def test_enabled_reports_parses_csv(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _settings(
+        monkeypatch,
+        APPSFLYER_ENABLED_REPORTS="installs_non_organic, installs_retargeting",
+    )
+    assert settings.appsflyer_enabled_reports == ["installs_non_organic", "installs_retargeting"]
+
+
+@pytest.mark.parametrize("raw", ["", "   ", " , ,"])
+def test_empty_enabled_reports_rejected(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+    """Same issue-#9 contract as the other CsvList fields: a truncated line must
+    abort startup, not degrade to a silent no-op run that pulls nothing.
+    """
+    with pytest.raises(ValidationError):
+        _settings(monkeypatch, APPSFLYER_ENABLED_REPORTS=raw)
 
 
 def test_splits_csv_app_ids(monkeypatch: pytest.MonkeyPatch) -> None:
