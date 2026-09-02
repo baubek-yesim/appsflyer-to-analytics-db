@@ -25,6 +25,13 @@ Placeholders used throughout — adjust to your environment:
 - Runs `appsflyer-pipeline daily` once a day via `appsflyer-daily.timer` → `appsflyer-daily.service`,
   loading yesterday's AppsFlyer Facebook Ads purchase events (Non-Organic + Retargeting) into
   `DB_NAME.DB_TABLE` (`analytics_statistics.appsflyer_events_fb` by default).
+- Since BAF-11 stage 4 the pipeline knows a **second** report family and a **second** table:
+  `installs`/`installs-retarget` → `DB_NAME.DB_TABLE_INSTALLS`
+  (`analytics_statistics.appsflyer_installs_fb` by default), a separate 130-column schema.
+  `create-table`/`check-connection` cover **both** tables. The **scheduled timer does not pull
+  installs** — `APPSFLYER_ENABLED_REPORTS` defaults to the two in-app-events reports only, and an
+  operator opts a single run into installs deliberately (see §5). That gate stays in place until the
+  cutover decision.
 - Schedule: `05:00` server-local time (± up to 5 min jitter), catches up automatically if the server
   was down (`Persistent=true`).
 - Secrets live only in `/etc/appsflyer/appsflyer.env` (mode 600) — never in the repo, never in git.
@@ -99,6 +106,23 @@ sudo chown appsflyer:appsflyer /etc/appsflyer/appsflyer.env
 ls -l /etc/appsflyer/appsflyer.env       # expect: -rw------- appsflyer appsflyer
 ```
 
+> **Upgrading to BAF-11 stage 4 — do this BEFORE `git pull`/`uv sync` (§13):** two new env vars.
+>
+> - **`DB_TABLE_INSTALLS` — required, no default.** Every command loads the full `Settings` at
+>   startup, so an EnvironmentFile without this key fails *every* invocation (including
+>   `check-connection`) with `FAILED: invalid configuration: db_table_installs: Field required`.
+>   Add it to `/etc/appsflyer/appsflyer.env` (§14's stopgap: `~/appsflyer-secrets/appsflyer.env`)
+>   **first**, then pull. Suggested value: `DB_TABLE_INSTALLS=appsflyer_installs_fb`. The table
+>   itself does not have to exist yet — `create-table` provisions it, and the run-time preflight
+>   only checks the tables of the reports a run is actually enabled to fetch.
+> - **`APPSFLYER_ENABLED_REPORTS` — optional, safe default.** Unset means
+>   `in_app_events_non_organic,in_app_events_retargeting`: exactly today's behaviour, installs never
+>   pulled. **A safe deploy does not need this line at all.** Add it only to deliberately opt a run
+>   into installs, and prefer scoping that to one run via a second `EnvironmentFile` on the
+>   `systemd-run` command line (§14's note on override precedence) over editing the standing file —
+>   editing the standing file opts the *scheduled timer* in too. An unrecognized key aborts the run
+>   loudly rather than silently pulling nothing.
+
 **Format reminder** (full detail in `deploy/appsflyer.env.example`): this is a systemd
 `EnvironmentFile`, not a shell script — no `export`, no `$VAR` expansion. `APPSFLYER_MEDIA_SOURCE=Facebook Ads`
 is written with the space literal and unquoted. `APPSFLYER_APP_IDS`/`APPSFLYER_EVENT_NAMES` are plain
@@ -144,8 +168,13 @@ sudo systemd-run --wait --pty --collect --unit=appsflyer-preflight \
   /opt/appsflyer/appsflyer-to-analytics-db/.venv/bin/appsflyer-pipeline create-table
 ```
 
-`check-connection` should print the MariaDB server version and the target table's status.
-`create-table` is idempotent — the table already exists in production, so expect "is ready.".
+`check-connection` should print the MariaDB server version and **each** target table's status —
+since BAF-11 stage 4 that is two lines, `DB_TABLE` and `DB_TABLE_INSTALLS`. `create-table` is
+idempotent and likewise covers both, so expect two "is ready." lines; the in-app-events table
+already exists in production, the installs one is created on first run. Provisioning the installs
+table does **not** by itself make any run pull installs — that is `APPSFLYER_ENABLED_REPORTS`'s
+job (§5), and it is deliberately scoped the other way so the table can be prepared ahead of a real
+cutover.
 
 **Schema note (2026-07-08, issue #14; updated 2026-07-10):** the live table gained an `id`
 PRIMARY KEY and an `idx_app_attr_time (app_id, attribution_type, event_time)` covering index for
@@ -334,6 +363,10 @@ deletes and reloads only that window; nothing outside it is touched (see `design
 section).
 
 ## 13. Redeploy / upgrade
+
+> **Check §5's upgrade note before pulling.** A release that adds a *required* env var breaks every
+> invocation until the EnvironmentFile has it — BAF-11 stage 4's `DB_TABLE_INSTALLS` is the current
+> instance. Update the EnvironmentFile first, then `git pull`.
 
 ```bash
 sudo -u appsflyer env HOME=/opt/appsflyer bash -c '

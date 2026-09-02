@@ -55,9 +55,11 @@ def version() -> None:
 
 @app.command(name="check-connection")
 def check_connection_command() -> None:
-    """Verify connectivity to the analytics MariaDB and report every active
-    report's target table status (BAF-11 stage 3: today that's exactly one
-    table, appsflyer_events_fb, shared by both registered ReportSpecs).
+    """Verify connectivity to the analytics MariaDB and report every REGISTERED
+    report's target table status -- since BAF-11 stage 4 that is two distinct
+    tables: in-app-events' (`DB_TABLE`, shared by its two specs) and installs'
+    (`DB_TABLE_INSTALLS`, likewise shared by its two). Registered, not enabled
+    -- see the asymmetry note at the top of this module.
     """
     settings = _get_settings_or_exit()
     engine = create_engine(settings)
@@ -78,9 +80,10 @@ def check_connection_command() -> None:
 
 @app.command(name="create-table")
 def create_table_command() -> None:
-    """Create every active report's target table if it doesn't already exist
-    (idempotent). BAF-11 stage 4: two distinct tables -- in-app-events'
-    17-column schema and installs' 128-column one.
+    """Create every REGISTERED report's target table if it doesn't already
+    exist (idempotent). BAF-11 stage 4: two distinct tables -- in-app-events'
+    17-column schema and installs' 130-column one. Registered, not enabled --
+    see the asymmetry note at the top of this module.
     """
     settings = _get_settings_or_exit()
     engine = create_engine(settings)

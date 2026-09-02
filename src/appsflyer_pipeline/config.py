@@ -102,8 +102,10 @@ class Settings(BaseSettings):
     # NOTE the default flipped here: BAF-2 defaulted to "Facebook Ads" /
     # af_purchase,af_purchase_YC, so an environment that never set these keys
     # widens to every media source on upgrade. That is why `_run_window` logs
-    # the unfiltered mode at WARNING until stage 5 gives the full export its own
-    # table — today it would land in BAF-2's `appsflyer_events_fb`.
+    # the unfiltered mode at WARNING — the full in-app-events export still
+    # lands in BAF-2's `appsflyer_events_fb`. (BAF-11 stage 4 gave *installs*
+    # its own table, which is a per-report split, not a per-media-source one:
+    # it does not narrow what these two filters widen.)
     appsflyer_media_source: RequiredStr | None = None
     appsflyer_event_names: Annotated[CsvList, Field(min_length=1)] | None = None
 

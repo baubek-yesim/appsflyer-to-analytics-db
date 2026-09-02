@@ -288,8 +288,9 @@ def test_run_daily_logs_the_effective_filter_mode(
     """Which rows a run is even eligible to load is now a config decision, so the
     run has to say out loud which mode it is in — once per run, before any
     request. Unfiltered is the wide-blast-radius mode and is logged at WARNING:
-    until stage 5 routes it to its own table, an unnoticed unfiltered run would
-    pour every media source into BAF-2's `appsflyer_events_fb`.
+    an unnoticed unfiltered run would pour every media source into BAF-2's
+    `appsflyer_events_fb`. (BAF-11 stage 4's installs table is a per-REPORT
+    split, not a per-media-source one, so it doesn't retire this warning.)
     """
     _set_env(monkeypatch)
     _mock_all_ok()

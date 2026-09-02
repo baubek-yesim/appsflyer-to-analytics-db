@@ -1,17 +1,32 @@
-"""ReportSpec: one AppsFlyer report, as data (BAF-11 stage 3).
+"""ReportSpec: one AppsFlyer report, as data (BAF-11 stages 3-4).
 
-Pure refactor -- REPORTS holds only the two report definitions that already
-exist (in-app-events non_organic + retargeting); nothing about what any
-existing command requests, transforms, or writes changes. Structurally
-separates "which report" (endpoint, request params, column mapping, target
-table) from the rest of the pipeline so a second report (installs, BAF-11
-stage 5/6) can be added by registering a new ReportSpec instead of threading
-a new branch through appsflyer_client.py/transform.py/loader.py/pipeline.py.
+Structurally separates "which report" (endpoint, request params, column
+mapping, dedupe key, retention policy, target table) from the rest of the
+pipeline, so adding a report means registering a ReportSpec rather than
+threading a new branch through
+appsflyer_client.py/transform.py/loader.py/pipeline.py.
+
+REPORTS holds FOUR entries since stage 4: in-app-events non_organic +
+retargeting (BAF-2's original two, unchanged byte for byte) and installs
+non_organic + retargeting. The two families differ in nearly every axis the
+dataclass exposes -- installs sends no `event_name`, requests 47
+`additional_fields`, maps its columns by normalization rather than a
+hand-written dict (`column_map=None`), keys its dedup on
+`(appsflyer_id, event_time)`, windows on `install_time`, and hard-clamps its
+own start date to a 60-day retention floor instead of warning and proceeding.
+
+Registered is not the same as enabled: `Settings.appsflyer_enabled_reports`
+(stage 4) decides which of these entries a backfill/daily run may actually
+fetch, and defaults to the two in-app-events keys only -- installs is
+available to run manually but stays out of the deployed scheduled timer until
+the cutover decision. `cli.py`'s create-table/check-connection deliberately
+ignore that gate; see the note at the top of that module.
 
 See docs/superpowers/plans/2026-08-31-baf-11-stage-3-report-spec.md's
 "Architecture decisions" section for which fields of the master spec's
-proposed ReportSpec shape this stage deliberately does NOT wire up yet
-(max_chunk_days, decimal_columns, dedupe_key, partition_columns) and why.
+proposed ReportSpec shape are still deliberately not wired up
+(max_chunk_days, decimal_columns, partition_columns) and why -- `dedupe_key`
+was on that list until stage 4 added it.
 """
 
 from __future__ import annotations

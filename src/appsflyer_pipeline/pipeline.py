@@ -10,8 +10,9 @@ layer decides the process exit code from it.
 
 Deliberately sequential (see docs/design-spec.md): AppsFlyer already rate-
 limits, and `appsflyer_client` already retries 429/5xx with backoff -- running
-these concurrently would only manufacture more 429s. At <=12 units per
-backfill / 4 per daily, wall time is dominated by AppsFlyer's own export
+these concurrently would only manufacture more 429s. At a couple of dozen
+units per backfill / a handful per daily (the exact count scales with
+`appsflyer_enabled_reports`), wall time is dominated by AppsFlyer's own export
 generation, not client concurrency. `_process_window` returning a
 self-contained result makes a future `ThreadPoolExecutor.map` a drop-in if
 that ever changes -- no need to build it now.
@@ -359,10 +360,15 @@ def _log_filter_mode(settings: Settings) -> None:
     Since BAF-11 stage 1 that is a config decision, not a constant, and the two
     modes differ by orders of magnitude (7,707 unfiltered event rows/day vs. a
     couple of dozen Meta purchases, measured 2026-08-13). Unfiltered is the
-    wide-blast-radius mode and is logged at WARNING deliberately: until stage 5
-    routes the full export to its own table, an unnoticed unfiltered run pours
-    every media source into BAF-2's `appsflyer_events_fb`. Downgrade this to
-    INFO once that routing exists.
+    wide-blast-radius mode and is logged at WARNING deliberately: an unnoticed
+    unfiltered run pours every media source into BAF-2's `appsflyer_events_fb`.
+
+    BAF-11 stage 4 added installs' own table and routing, but that does NOT
+    make this warning obsolete: the routing is per-REPORT (installs -> its own
+    table), not per-media-source. These two filters still decide how wide the
+    IN-APP-EVENTS pull into `settings.db_table` is, which is exactly what the
+    message names. Downgrade to INFO only once the full unfiltered
+    in-app-events export has a destination of its own.
     """
     media_source = settings.appsflyer_media_source
     event_names = settings.appsflyer_event_names
