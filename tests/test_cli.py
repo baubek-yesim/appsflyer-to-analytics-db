@@ -100,19 +100,20 @@ def test_check_connection_reports_status_for_both_branches(
 
 def test_create_table_success_reports_ready(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_cli_env(monkeypatch)
-    monkeypatch.setattr(cli, "create_table", lambda engine, table_name: None)
+    monkeypatch.setattr(cli, "create_table", lambda engine, table_name, report_name: None)
 
     result = runner.invoke(app, ["create-table"])
 
     get_settings.cache_clear()
     assert result.exit_code == 0
     assert "is ready." in result.output
+    assert result.output.count("is ready.") == 2  # BAF-11 stage 4: two distinct tables now
 
 
 def test_create_table_reports_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_cli_env(monkeypatch)
 
-    def _raise(engine: object, table_name: str) -> None:
+    def _raise(engine: object, table_name: str, report_name: str) -> None:
         raise PipelineError(f"Could not create table `{table_name}`: boom")
 
     monkeypatch.setattr(cli, "create_table", _raise)

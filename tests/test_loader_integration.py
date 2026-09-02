@@ -58,8 +58,10 @@ def test_create_table_is_idempotent() -> None:
     try:
         settings = get_settings()
         engine = create_engine(settings)
-        create_table(engine, settings.db_table)
-        create_table(engine, settings.db_table)  # second call must not raise
+        create_table(engine, settings.db_table, REPORTS["in_app_events_non_organic"].name)
+        create_table(
+            engine, settings.db_table, REPORTS["in_app_events_non_organic"].name
+        )  # second call must not raise
         status = check_connection(engine, settings.db_table)
     except Exception as exc:
         pytest.skip(f"no usable database in this environment: {exc}")
@@ -71,7 +73,7 @@ def test_load_events_is_idempotent_and_isolated() -> None:
     try:
         settings = get_settings()
         engine = create_engine(settings)
-        create_table(engine, settings.db_table)
+        create_table(engine, settings.db_table, REPORTS["in_app_events_non_organic"].name)
     except Exception as exc:
         pytest.skip(f"no usable database in this environment: {exc}")
 
@@ -156,7 +158,7 @@ def test_load_events_logs_rowcounts_and_warns_on_wipe(
     try:
         settings = get_settings()
         engine = create_engine(settings)
-        create_table(engine, settings.db_table)
+        create_table(engine, settings.db_table, REPORTS["in_app_events_non_organic"].name)
     except Exception as exc:
         pytest.skip(f"no usable database in this environment: {exc}")
 

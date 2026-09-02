@@ -71,19 +71,20 @@ def check_connection_command() -> None:
 @app.command(name="create-table")
 def create_table_command() -> None:
     """Create every active report's target table if it doesn't already exist
-    (idempotent). BAF-11 stage 3: today that's exactly one table.
+    (idempotent). BAF-11 stage 4: two distinct tables -- in-app-events'
+    17-column schema and installs' 128-column one.
     """
     settings = _get_settings_or_exit()
     engine = create_engine(settings)
-    tables = sorted({spec.table(settings) for spec in REPORTS.values()})
+    tables = sorted({(spec.table(settings), spec.name) for spec in REPORTS.values()})
     try:
-        for table in tables:
-            create_table(engine, table)
+        for table, report_name in tables:
+            create_table(engine, table, report_name)
     except PipelineError as exc:
         typer.echo(f"FAILED: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
-    for table in tables:
+    for table, _report_name in tables:
         typer.echo(f"Table `{table}` is ready.")
 
 
