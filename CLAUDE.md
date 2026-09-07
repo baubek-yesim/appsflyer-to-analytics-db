@@ -87,3 +87,42 @@ matching the stage numbering below.
    per the design's rate-limit risk mitigation, not a bug) from the cumulative testing today — pending
    scoped retries once the quota resets. See `docs/design-spec.md`'s Acceptance Criteria and Risks,
    and `docs/RUNBOOK.md` §14, for full detail.
+
+## BAF-11 build stages
+
+[BAF-11](https://yesimapp.atlassian.net/browse/BAF-11) supersedes BAF-2's scope: drop the
+media_source/event_names filters (load the full raw export), add a second report family
+(installs/installs-retarget), keep everything BAF-2 already built. Full requirements analysis and
+the 10-stage plan (Этап 0-10) are in
+[`docs/superpowers/plans/2026-08-13-baf-11-full-raw-export.md`](docs/superpowers/plans/2026-08-13-baf-11-full-raw-export.md).
+Branch/PR numbering below is this ticket's own (`baf-11-stage-N-<slug>`, independent of BAF-2's
+`stage-N` numbers above) and doesn't map 1:1 onto the master spec's Этапы — noted per stage.
+
+1. Этап 1 — optional `media_source`/`event_names` filters (three-valued: unset = no filter, named
+   = BAF-2 behavior, blank = fail loud) — done, [PR #57](https://github.com/baubek-yesim/appsflyer-to-analytics-db/pull/57)
+   merged.
+2. Этап 2 + part of Этап 8 — quota-aware chunking (`APPSFLYER_CHUNK_DAYS`) and dedupe/NOT-NULL
+   hardening — done, [PR #59](https://github.com/baubek-yesim/appsflyer-to-analytics-db/pull/59)
+   merged.
+3. Этап 3 — `ReportSpec`/`REPORTS` registry refactor (pure, no behavior change — generalizes the
+   pipeline from hardcoded in-app-events assumptions to a report-type-parameterized model, the
+   prerequisite for stage 4) — done, executed via subagent-driven development (7 tasks +
+   whole-branch review, verdict clean),
+   [PR #60](https://github.com/baubek-yesim/appsflyer-to-analytics-db/pull/60) merged.
+4. Этап 5 + Этап 6 combined — second table (`DB_TABLE_INSTALLS`) + the installs/installs-retarget
+   report itself (130-column DDL, full pass-through column mapping, distinct
+   `(appsflyer_id, event_time)` dedupe key, hard-clamped 60-day retention) — done, executed via
+   subagent-driven development (8 tasks; whole-branch review first returned `needs_fixes` — 6
+   important cross-task findings, notably installs entering the live scheduled timer with no gate
+   and a client-side filter silently zeroing installs rows — fixed in one follow-up round, CI green
+   against `mysql:8` including the new installs-DDL-creation test),
+   [PR #61](https://github.com/baubek-yesim/appsflyer-to-analytics-db/pull/61) merged. Installs is
+   registered but **off by default** — `APPSFLYER_ENABLED_REPORTS` defaults to the two in-app-events
+   reports only, so the deployed timer keeps pulling exactly what it does today until Этап 9.
+
+Not started: Этап 4 (throughput/observability before full mode), Этап 7 (prod schema — blocker for
+full mode, not a parallel track), Этап 9 (cutover procedure — the `APPSFLYER_ENABLED_REPORTS`
+default flip, plus dropping the media_source/event_names filters entirely for the real "full raw
+export" behavior), Этап 10 (acceptance). Also still open: this doc's intro line ("Implements
+BAF-2") is now stale relative to BAF-11's superseding scope — not updated here since it's outside
+what this update covers.
