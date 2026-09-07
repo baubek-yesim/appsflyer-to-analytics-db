@@ -16,7 +16,9 @@ Environment=PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 
 ExecStart=%h/GitHubRepos/appsflyer-to-analytics-db/.venv/bin/appsflyer-pipeline daily
 
-TimeoutStartSec=1800
+# Same arithmetic as ../appsflyer-daily.service (issue #35): ~10.3 min
+# worst case per window x 8 windows in full mode.
+TimeoutStartSec=3600
 
 StandardOutput=journal
 StandardError=journal

@@ -39,8 +39,12 @@ ExecStart=/opt/appsflyer/appsflyer-to-analytics-db/.venv/bin/appsflyer-pipeline 
 # ExecStart=/opt/appsflyer/appsflyer-to-analytics-db/.venv/bin/python -m appsflyer_pipeline.cli daily
 
 # AppsFlyer export generation + tenacity retry/backoff can take several
-# minutes; the systemd default (~90s) would SIGTERM a healthy run.
-TimeoutStartSec=1800
+# minutes; the systemd default (~90s) would SIGTERM a healthy run. Sized from
+# the client's own worst case (issue #35): 5 attempts x 120 s request timeout
+# + ~20 s of jittered backoff ~= 10.3 min per window, and a full-mode daily
+# is 8 windows (2 apps x 4 reports) -- 1800 s could kill a merely slow
+# AppsFlyer day mid-window, leaving the rest of that run's windows unpulled.
+TimeoutStartSec=3600
 
 # --- Logging -> journald ---
 StandardOutput=journal

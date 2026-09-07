@@ -225,32 +225,57 @@ journalctl -u appsflyer-daily.service -n 100 --no-pager
 journalctl -t appsflyer-daily -f                 # follow live
 ```
 
-## 9. First backfill (~90-day historical load)
+## 9. First backfill — and the two AppsFlyer limits that shape every run
 
-> **Retention caveat — read before running.** The BAF-2 ticket's acceptance criteria ask for backfill
-> from **2025-01-01**, but the AppsFlyer Pull API retains only **~90 days** of data (per Mark
-> Malovichko's BAF-2 comment; `MAX_RETENTION_DAYS = 90` in `appsflyer_client.py`). This backfill
-> therefore loads only `[yesterday − 89d, yesterday]` — **not** full history back to 2025-01-01. That
-> gap is an **open, unresolved stakeholder decision** (accept a rolling ~90-day backfill, or source
-> pre-90-day history from AppsFlyer Data Locker / a raw export / the legacy
-> `yesim_appsflyer_raw_events` table) — see `design-spec.md`'s Risks table. Do not record this step as
-> "full history loaded."
+> **Rewritten 2026-09-07 (BAF-11 stage 5).** Two facts from AppsFlyer's own documentation
+> ("Data availability windows" and "Report generation quotas", support.appsflyer.com) explain
+> every "weird limit" this project has hit. Read them before running anything by hand.
 
-Preview first, then load, via `systemd-run` so it uses the same secrets/sandbox as the daily job and
-lands in journald:
+**Availability window (how far back data exists).** The API *accepts* dates up to 90 days back
+(older → HTTP 400) but only *serves*:
+
+| Report type | Data available |
+|---|---|
+| In-app events (`in_app_events_report`, `in-app-events-retarget`) | **31 out of the last 90 days** |
+| Installs / retargeting conversions (`installs_report`, `installs-retarget`) | **60 out of the last 90 days** |
+
+Between the window and 90 days the API returns HTTP 200 with a valid header and **zero rows** —
+indistinguishable from a quiet day (issue #45's "~35-day" observation). Our table is the only copy
+of anything older. The pipeline therefore **hard-clamps** every report to its window (a requested
+start before it is moved up with a WARNING; a window entirely before it is skipped, "0/0 windows",
+exit 0), and `load_events` **refuses** to replace a populated window with an empty fetch (a FAILED
+window, exit 1, rows untouched). BAF-2's "backfill from 2025-01-01" is unsatisfiable via this API.
+Do not try to work around either guard by hand.
+
+**Download quota (how many calls per day).** Per **report type × app × calendar day (00:00 UTC =
+03:00 Europe/Riga)**, plus an account-level cap; the advertiser values depend on the subscription
+and are not published — measured ~6-7/day for in-app events. It counts **calls, not rows**: a
+31-day chunk costs the same as one day, and **`--dry-run` costs the same as a real run.** The four
+report types are four separate quotas. The raw-data export page in the AppsFlyer UI has its own,
+separate quota (a manual UI export never competes with the pipeline; a Pull API script using the
+same token does). The scheduled timer fires at 05:00 Riga, after the reset. Observed live:
+`HTTP 400 "You've reached your maximum number of in-app event reports that can be downloaded today
+for this app"` — a plain 4xx, correctly not retried; chunk isolation means only that combo fails.
+
+Cost of the standard operations, per (app × report type):
+
+| Operation | Calls per combo | Total, 2 apps × 4 reports |
+|---|---:|---:|
+| `daily` in full mode | 1 | 8 |
+| `backfill` (no args): in-app events, 31 days, chunk 31 | 1 | 4 |
+| `backfill` (no args): installs, 60 days, chunk 31 | 2 | 8 |
+| **Cutover day = daily + one backfill** | **≤ 3** | **20** |
+
+The only way to exhaust the quota is repeated same-day testing on the same combo. Rules: never
+dry-run and then run the same window the same day; never re-run a whole backfill to "fix" one
+failed window — wait for 03:00 Riga and re-run just that window with `--start-date/--end-date`.
+
+**The backfill itself.** Go straight to the real call (a preview would spend the same quota) via
+`systemd-run`, so it uses the same secrets/sandbox as the daily job and lands in journald:
 
 ```bash
-# Preview -- no writes:
-sudo systemd-run --wait --pty --collect --unit=appsflyer-backfill \
-  --property=Type=oneshot --property=TimeoutStartSec=7200 \
-  --property=User=appsflyer --property=Group=appsflyer \
-  --property=WorkingDirectory=/opt/appsflyer/appsflyer-to-analytics-db \
-  --property=EnvironmentFile=/etc/appsflyer/appsflyer.env \
-  /opt/appsflyer/appsflyer-to-analytics-db/.venv/bin/appsflyer-pipeline backfill --dry-run
-
-# Real load, once the preview looks right:
 sudo systemd-run --collect --unit=appsflyer-backfill \
-  --property=Type=oneshot --property=TimeoutStartSec=7200 \
+  --property=Type=oneshot --property=TimeoutStartSec=10800 \
   --property=User=appsflyer --property=Group=appsflyer \
   --property=WorkingDirectory=/opt/appsflyer/appsflyer-to-analytics-db \
   --property=EnvironmentFile=/etc/appsflyer/appsflyer.env \
@@ -258,34 +283,9 @@ sudo systemd-run --collect --unit=appsflyer-backfill \
 journalctl -u appsflyer-backfill -f
 ```
 
-To gather evidence toward resolving the retention conflict, you can deliberately probe below the
-90-day floor — the pipeline does **not** silently clamp an explicit `--start-date`; it logs a warning
-and proceeds, so you can observe what AppsFlyer actually returns:
-
-```bash
-sudo systemd-run --wait --pty --collect --unit=appsflyer-probe \
-  --property=User=appsflyer --property=Group=appsflyer \
-  --property=WorkingDirectory=/opt/appsflyer/appsflyer-to-analytics-db \
-  --property=EnvironmentFile=/etc/appsflyer/appsflyer.env \
-  /opt/appsflyer/appsflyer-to-analytics-db/.venv/bin/appsflyer-pipeline \
-  backfill --start-date 2025-01-01 --end-date <yesterday> --dry-run
-```
-Record the observed behavior (empty windows vs. errors) in the BAF-2 ticket to help close the open
-question.
-
-> **Daily download quota — confirmed live, twice.** AppsFlyer caps how many in-app event reports can be
-> downloaded per `(app_id, attribution_type)` combo per calendar day — empirically around 6-7
-> downloads before it trips (observed: `HTTP 400 "You've reached your maximum number of in-app event
-> reports that can be downloaded today for this app"`). A backfill alone spans many chunks × apps ×
-> attribution types, so running `--dry-run` and then the real load back-to-back can exhaust it
-> partway through the real run; layering manual preflight/verification calls on top (as in §14) can
-> exhaust it for *additional* combos beyond what the backfill itself touched. This is a plain 4xx, so
-> the client correctly does **not** retry it — retrying immediately just fails again. Chunk-level
-> isolation means the rest of the run still completes; only the exhausted combo(s) fail. Do not
-> immediately re-run the whole backfill/daily to "fix" this — wait for the quota to reset (next day)
-> and re-run just the failed window(s) with `--start-date`/`--end-date`. If you must minimize API
-> calls during a first backfill or verification pass, skip `--dry-run` previews and go straight to the
-> real call, and avoid re-running the same app/attribution combo more than once or twice in a day.
+Expect two `clamping ...` WARNINGs (one per report family — the nominal 90-day request being cut
+to 31/60 days), then one `OK` line per chunk. The no-root stopgap (§14) uses the same command with
+`--user`, no `User=`/`Group=`, and the `$HOME/...` paths.
 
 ## 10. Monitoring (day-to-day)
 
@@ -336,10 +336,12 @@ monitor alert on missed pings.
 | "Failed to load environment files" / pydantic `ValidationError` | Env-file perms or format wrong | `ls -l /etc/appsflyer/appsflyer.env` (must be 600, owned by the service user); re-check §5/§6 — no JSON arrays, no `export`, literal unquoted spaces. |
 | `PipelineError: Could not connect...` | DB unreachable | `nc -vz <DB_HOST> 3306`; check firewall/security group and `DB_USER` grants; confirm `RestrictAddressFamilies` in the unit still includes `AF_INET`/`AF_UNIX` (needed for DNS). |
 | `AppsFlyerAPIError: HTTP 401/403` | Bad/expired API token | Get a fresh token from Mark Malovichko. |
-| `AppsFlyerAPIError: HTTP 404` or empty result | Wrong `APPSFLYER_APP_IDS`, or a date before the 90-day floor | Confirm app IDs; expected for pre-retention dates (§9). |
-| `AppsFlyerAPIError: HTTP 400 "...maximum number of in-app event reports that can be downloaded today..."` | AppsFlyer's per-app daily report-download quota exhausted (confirmed live — see the note in §9) | Don't retry today — it will fail again. Wait for the quota to reset (next day), then re-run just the failed window(s) with `backfill --start-date/--end-date`. |
+| `AppsFlyerAPIError: HTTP 404` or empty result | Wrong `APPSFLYER_APP_IDS` | Confirm app IDs. |
+| `AppsFlyerAPIError: HTTP 400 "...maximum number of ... reports that can be downloaded today..."` | That report type's daily download quota for that app is exhausted (per report type × app × UTC day — §9) | Don't retry today — it will fail again. Wait for 03:00 Europe/Riga (00:00 UTC), then re-run just the failed window(s) with `backfill --start-date/--end-date`. |
+| WARNING `clamping <report> ... before the N-day retention floor` / `skipping <report> ... entirely before` | The requested window reaches past that report's availability window (31 days in-app events, 60 installs — §9) | Expected for a no-args `backfill`. Nothing to fix; the data simply no longer exists at the source. |
+| `PipelineError: refusing to wipe populated window ... fetched 0 rows but N already loaded` (a FAILED window, exit 1) | AppsFlyer returned a valid-but-empty report for a window we hold rows for — an upstream anomaly, or an availability-floor edge (issue #45) | Nothing was deleted. Re-run the window later; if the source has genuinely gone to zero for that window and you want ours to match, that is a deliberate manual `DELETE` (or `load_events(..., allow_wipe=True)` from a Python shell), not a pipeline re-run. |
 | `AppsFlyerAPIError: ... empty response body` or `TransformError: ... missing expected column(s)` on a window that used to load fine | AppsFlyer sent an anomalous 200 (truly empty or error-text body), or the export's header set drifted — a legitimate empty report always carries the full CSV header row (issue #26, live-verified 2026-07-09) | Nothing was deleted — the window's previously loaded rows are intact. Re-run just that window with `--dry-run` to inspect; if AppsFlyer renamed columns, update `reports._IN_APP_EVENTS_COLUMN_MAP`; otherwise re-run the window once the upstream anomaly clears. |
-| Job killed / times out | `TimeoutStartSec` too low for a large window | Already 1800s for daily / 7200s for backfill in the examples above; raise further if needed. |
+| Job killed / times out | `TimeoutStartSec` too low for a slow AppsFlyer day | 3600s for daily (sized from the retry policy's worst case, issue #35) / 10800s for backfill in the §9 example; raise further if needed. |
 | `SIGSYS` or crash right at startup | A hardening directive is too tight | Comment out `MemoryDenyWriteExecute` if enabled, then loosen `SystemCallFilter`; `daemon-reload` and retry. |
 | `status=218/CAPABILITIES`, "Failed to drop capabilities" (user-level unit, §14) | `ProtectClock`/`ProtectKernelModules`/`ProtectKernelLogs` in a `systemd --user` unit on a host that forbids unprivileged user namespaces (Ubuntu 24.04 ships `kernel.apparmor_restrict_unprivileged_userns=1`) — hit live on the first scheduled fire, issue #19 | Remove those three directives from the user-level unit only (they're security no-ops without root anyway; the root-based unit keeps them). Re-copy to `~/.config/systemd/user/`, `systemctl --user daemon-reload`, then `systemctl --user start appsflyer-daily.service` once to confirm and to load the day the failed fire missed. |
 
@@ -455,3 +457,80 @@ loginctl disable-linger "$(whoami)"
 rm -rf ~/.config/systemd/user/appsflyer-daily.{service,timer} ~/appsflyer-secrets
 # ~/GitHubRepos/appsflyer-to-analytics-db can stay as a dev clone, or be removed too
 ```
+
+
+## 15. BAF-11 cutover — from Facebook-purchases-only to the full raw export
+
+Applies to the live no-root deployment (§14); substitute the root paths from §§4-7 if that has
+migrated. Every step that writes to production or spends quota is marked **[write]**. The whole
+procedure spends **at most 3 report downloads per (app × report type) on any one day** (§9), so it
+cannot trip the quota unless someone also runs manual pulls the same day — ask Mark not to run his
+Pull API scripts on days D..D+2 (UI exports are fine, separate quota).
+
+### Day D — deploy the new code with the OLD behavior ("parallel", Mark's condition)
+
+1. **[write]** Add the one new required key to `~/appsflyer-secrets/appsflyer.env` **before**
+   pulling (§5): `DB_TABLE_INSTALLS=appsflyer_installs_fb`. Leave the two filter lines and
+   everything else as they are.
+2. `cd ~/GitHubRepos/appsflyer-to-analytics-db && git pull && ~/.local/bin/uv sync --frozen --no-dev`
+3. Preflight through systemd (§14 pattern, quota 0): `check-connection` → two table lines, the
+   installs one "does not exist yet".
+4. **[write, DDL]** `create-table` through the same pattern → creates `appsflyer_installs_fb`
+   (130 columns, `idx_app_attr_install`). Idempotent.
+5. **[write, DDL]** Этап 7: run `sql/migrations/2026-07-08-add-id-pk-and-index.sql` once against
+   `appsflyer_events_fb` (the production table was recreated on 2026-07-10 without its PK/index —
+   §6). `power_bi_user` holds `INDEX, ALTER` (verified 2026-08-13). Verify:
+   `SHOW INDEX FROM appsflyer_events_fb` lists `idx_app_attr_time`.
+6. Install the updated unit (`TimeoutStartSec=3600`):
+   `cp deploy/user-level/appsflyer-daily.service ~/.config/systemd/user/ && systemctl --user daemon-reload`
+7. **Run nothing by hand.** The next scheduled fire (D+1, 05:00) is the test: new code, old
+   filters, expect `4/4 windows OK` and a `filters: media_source=Facebook Ads, event_names=...`
+   line in `journalctl --user -u appsflyer-daily.service`. Quota spent: the usual 1 per combo.
+
+### Day D+1 — flip, then backfill once
+
+8. Confirm step 7's run was clean. Then **[write]** edit the env file:
+   - comment out `APPSFLYER_MEDIA_SOURCE` and `APPSFLYER_EVENT_NAMES` (absent = no filter; a
+     present-but-blank line is a startup error — §5);
+   - add `APPSFLYER_ENABLED_REPORTS=in_app_events_non_organic,in_app_events_retargeting,installs_non_organic,installs_retargeting`;
+   - add `APPSFLYER_DAILY_LOOKBACK_DAYS=3` (issue #8; zero extra quota).
+9. **[write + quota]** Exactly **one** real `backfill`, **no `--dry-run` first** (§9's command with
+   `--user`, `TimeoutStartSec=10800`). No date arguments: the clamp yields 31 days of in-app events
+   and 60 of installs by itself (two `clamping` WARNINGs are expected). Mark's ordering rule
+   ("Meta first, then everything") is satisfied by construction — the Facebook rows for those 31
+   days are already in the table, and each window is replaced by its superset. Expect **12/12**
+   windows; a `refusing to wipe` FAILED window means the source returned empty for a day we hold —
+   stop and look, don't re-run.
+10. Verify with read-only SQL (`power_bi_user`, `SELECT` only):
+    - per `DATE(event_time)` in the last 31 days, `COUNT(*) WHERE media_source='Facebook Ads' AND
+      event_name IN ('af_purchase','af_purchase_YC')` is **≥** the same count taken before step 9
+      (the full export cannot contain fewer Facebook purchases than the filtered one did);
+    - `media_source` now has many values (googleadwords_int, any_source, Email, …) and
+      `event_name` includes `screen_*`/`alert_*`;
+    - `SELECT COUNT(*) FROM appsflyer_installs_fb GROUP BY app_id, attribution_type` — non-zero for
+      both apps; `com.yesimmobile` on the order of 1.5-2k installs and ~0.9k retargeting per day
+      (2026-08-13 measurement);
+    - `journalctl --user -u appsflyer-backfill` has no `wiped` and no `refusing to wipe`.
+11. If a window failed on quota (HTTP 400): wait for 03:00 Riga, re-run **only** that window with
+    `backfill --start-date/--end-date`.
+
+### Day D+2 — first scheduled run in full mode
+
+12. `journalctl --user -u appsflyer-daily.service --since today`: `8/8 windows OK`, run time well
+    under 5 minutes, `deleted>0 inserted>0` for the three lookback days (that is the lookback
+    re-pull, not a wipe), no WARNING other than the dedupe counters. Two clean days = stable.
+13. Report in BAF-11 (in Russian; see the 2026-09-07 plan for the content): what runs where, the
+    31/60-day availability model and its consequence for the "before/after cutover" gap in the
+    table, the quota rules for manual pulls, the two dedupe decisions for sign-off, and a request
+    to spot-check one day against a UI export.
+
+### Rollback
+
+- After step 6: `git checkout 89a1b91 && ~/.local/bin/uv sync --frozen --no-dev`, remove
+  `DB_TABLE_INSTALLS` from the env file → the pre-BAF-11 behavior. (Any commit before stage 4
+  works; 89a1b91 is what ran until 2026-09.)
+- After step 8: restore the two filter lines and remove `APPSFLYER_ENABLED_REPORTS` → the next
+  fire pulls Facebook purchases only again. Rows already loaded in full mode stay; the next runs
+  replace only the lookback window with the filtered subset — a deliberate loss of the non-Facebook
+  rows for those days, acceptable only as a conscious rollback.
+- The installs table is new and unread by anyone; drop it only by explicit decision.

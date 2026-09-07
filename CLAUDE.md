@@ -1,8 +1,11 @@
 # appsflyer-to-analytics-db
 
-Loads AppsFlyer Pull API purchase events (Non-Organic + Retargeting, Facebook Ads) into the
-analytics MariaDB. Implements [BAF-2](https://yesimapp.atlassian.net/browse/BAF-2). Full design
-in [`docs/design-spec.md`](docs/design-spec.md) — read it before making architectural changes.
+Loads AppsFlyer Pull API raw data into the analytics MariaDB: every in-app event (Non-Organic +
+Retargeting, all media sources) into one table, every install / retargeting conversion (all 128
+raw fields) into a second. Built for [BAF-2](https://yesimapp.atlassian.net/browse/BAF-2)
+(Facebook Ads purchases only) and widened by [BAF-11](https://yesimapp.atlassian.net/browse/BAF-11)
+to the full raw export. Full design in [`docs/design-spec.md`](docs/design-spec.md) — read it
+before making architectural changes.
 
 ## Stack
 
@@ -47,11 +50,19 @@ silently rot.
   when no DB is reachable — CI provides one via a service container; locally a real `.env` also
   satisfies it. They're read-only or `CREATE TABLE IF NOT EXISTS`, safe to run against production.
 
-## Known open issue
+## AppsFlyer limits (read before touching production)
 
-The ticket's acceptance criteria ask for backfill from **2025-01-01**, but the AppsFlyer Pull API
-only retains **90 days** of data (per Mark Malovichko's BAF-2 comment). This is unresolved —
-flagged in `docs/design-spec.md` — needs a stakeholder decision before backfill can be called done.
+- **Availability window, not 90 days:** the Pull API refuses dates older than 90 days (HTTP 400),
+  but only serves **31 days of in-app events** and **60 days of installs** (support.appsflyer.com,
+  "Data availability windows"). In between it returns a valid, header-only **empty** report. The
+  pipeline hard-clamps every report to its window (`reports.IN_APP_EVENTS_AVAILABILITY_DAYS` /
+  `INSTALLS_AVAILABILITY_DAYS`) and `load_events` refuses to replace a populated window with an
+  empty fetch — our table is the only copy of anything older. BAF-2's "backfill from 2025-01-01"
+  is therefore unsatisfiable via this API, closed as such.
+- **Download quota** is per report type × app × UTC day (resets 03:00 Europe/Riga), subscription-
+  dependent (~6-7/day measured for in-app events), and counts **calls, not rows** — a 31-day pull
+  and a `--dry-run` each cost exactly one. Never dry-run-then-run the same combo on the same day;
+  see `docs/RUNBOOK.md` §9.
 
 ## Git workflow
 
@@ -120,9 +131,15 @@ Branch/PR numbering below is this ticket's own (`baf-11-stage-N-<slug>`, indepen
    registered but **off by default** — `APPSFLYER_ENABLED_REPORTS` defaults to the two in-app-events
    reports only, so the deployed timer keeps pulling exactly what it does today until Этап 9.
 
-Not started: Этап 4 (throughput/observability before full mode), Этап 7 (prod schema — blocker for
-full mode, not a parallel track), Этап 9 (cutover procedure — the `APPSFLYER_ENABLED_REPORTS`
-default flip, plus dropping the media_source/event_names filters entirely for the real "full raw
-export" behavior), Этап 10 (acceptance). Also still open: this doc's intro line ("Implements
-BAF-2") is now stale relative to BAF-11's superseding scope — not updated here since it's outside
-what this update covers.
+5. Cutover safety (pre-Этап 9, replaces the parts of Этап 4 that the measured volumes actually
+   need) — in-app-events hard-clamped to AppsFlyer's documented 31-day availability window (issue
+   #45's "~35-day silent empty" explained and closed), `load_events` refuses to wipe a populated
+   window with an empty fetch unless `allow_wipe=True`, `TimeoutStartSec` 1800 → 3600 (issue
+   #35), RUNBOOK §9 rewritten around the real availability/quota model and §15 added with the
+   cutover procedure — done, `baf-11-stage-5-cutover-safety`.
+
+Not started: Этап 7 (prod PK/index migration — a one-off `ALTER`, RUNBOOK §15 step 2), Этап 9
+(the cutover itself — RUNBOOK §15), Этап 10 (acceptance — §15 step 4). Deliberately not done:
+Этап 4's streaming loader/transform (a full-mode day is ~25k rows, a full backfill under 1M — see
+the 2026-08-13 measurement) and a real alerting backend (issue #16, stub kept by decision
+2026-09-07).
