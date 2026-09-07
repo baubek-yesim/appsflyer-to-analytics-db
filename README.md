@@ -1,8 +1,10 @@
 # appsflyer-to-analytics-db
 
-Loads AppsFlyer Pull API purchase events (Non-Organic + Retargeting, Facebook Ads) into the analytics
-MariaDB. Implements [BAF-2](https://yesimapp.atlassian.net/browse/BAF-2). Design details in
-[`docs/design-spec.md`](docs/design-spec.md).
+Loads AppsFlyer Pull API raw data into the analytics MariaDB: every in-app event (Non-Organic +
+Retargeting, all media sources) into one table, and every install / retargeting conversion (all
+128 raw fields) into a second. Built for [BAF-2](https://yesimapp.atlassian.net/browse/BAF-2)
+(Facebook Ads purchases only) and widened by [BAF-11](https://yesimapp.atlassian.net/browse/BAF-11)
+to the full raw export. Design details in [`docs/design-spec.md`](docs/design-spec.md).
 
 ## Requirements
 
@@ -22,17 +24,19 @@ uv run pre-commit install   # optional: run lint/format/type checks on every com
 ```bash
 uv run appsflyer-pipeline check-connection   # verify DB connectivity
 uv run appsflyer-pipeline create-table       # create the target table (idempotent)
-uv run appsflyer-pipeline backfill           # historical load: full available window (<=90 days)
+uv run appsflyer-pipeline backfill           # historical load: everything AppsFlyer still serves (31 days of in-app events, 60 of installs)
 uv run appsflyer-pipeline daily              # yesterday's incremental load
 ```
 
 Add `--dry-run` to `backfill`/`daily` to preview row counts without writing to the database.
 
-`backfill` accepts `--start-date`/`--end-date` (ISO `YYYY-MM-DD`) to override the default 90-day
-window — e.g. to re-run a specific gap, or to probe what AppsFlyer actually returns for dates older
-than its 90-day retention floor (see the "Known open issue" in `CLAUDE.md`). `daily` accepts `--date`
-to replay a single missed day. Both loads are idempotent per `(app_id, attribution_type, window)`, so
-re-running any of these is always safe.
+`backfill` accepts `--start-date`/`--end-date` (ISO `YYYY-MM-DD`) to override the default window —
+e.g. to re-run a specific gap. Every report is hard-clamped to AppsFlyer's documented availability
+window (31 days for in-app events, 60 for installs — see `docs/RUNBOOK.md` §9): dates before it are
+skipped with a warning, never fetched, because the API answers them with a valid-but-empty report
+that would otherwise replace the only copy of that data, ours. `daily` accepts `--date` to replay a
+single missed day. Both loads are idempotent per `(app_id, attribution_type, window)`, and an empty
+fetch never wipes a window that already holds rows, so re-running any of these is always safe.
 
 ## Development
 

@@ -27,8 +27,15 @@ if TYPE_CHECKING:
 _BASE_URL = "https://hq1.appsflyer.com/api/raw-data/export/app"
 _REQUEST_TIMEOUT = 120.0
 
-# AppsFlyer Pull API limits (per Mark's comment on BAF-2): data retained 90 days,
-# and at most 31 days of data can be requested per call.
+# AppsFlyer Pull API limits: a request for dates older than 90 days is refused
+# outright (HTTP 400 "The raw data report availability window is limited to 90
+# days"), and at most 31 days of data can be requested per call. 90 is NOT how
+# far back data is actually *available* -- that is a shorter, per-report-type
+# window (31 days for in-app events, 60 for installs; see
+# reports.IN_APP_EVENTS_AVAILABILITY_DAYS / INSTALLS_AVAILABILITY_DAYS), inside
+# which the API answers with a valid but EMPTY report. This constant only
+# sizes the nominal backfill request and the run-level "before the 400
+# boundary" warning; each ReportSpec clamps its own fetch window.
 MAX_RETENTION_DAYS = 90
 MAX_CHUNK_DAYS = 31
 

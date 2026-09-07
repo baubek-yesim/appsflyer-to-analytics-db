@@ -7,26 +7,27 @@
 
 ## Goals
 
-- Load AppsFlyer **In-App Events** purchases attributed to Facebook Ads from two Pull API v5 sources —
-  **Non-Organic** and **Retargeting** — into a single MariaDB table.
+- Load AppsFlyer **In-App Events** from two Pull API v5 sources — **Non-Organic** and
+  **Retargeting** — into a single MariaDB table. BAF-2 scoped this to Facebook Ads purchases;
+  BAF-11 widened it to every media source and every event (the filters are now optional config).
+- Load AppsFlyer **Installs** (non-organic installs + retargeting conversions, all 128 raw
+  fields) into a second table (BAF-11).
 - Support both a one-time **historical backfill** and an ongoing **daily incremental** load.
 - Make every load idempotent, so backfill chunks and daily runs can be safely re-run.
 - Run unattended on a CLI-only Linux server via a systemd timer.
 
 ## Non-Goals
 
-- Building a general-purpose AppsFlyer connector for media sources other than Facebook Ads, or event
-  types other than `af_purchase` / `af_purchase_YC`.
+- Report families beyond in-app events and installs (uninstalls, ad revenue, Protect360, …), or
+  aggregate/cohort APIs — the `ReportSpec` registry makes adding one cheap, but none is in scope.
 - Real-time/streaming ingestion — this is a scheduled batch pull.
 - Replacing or migrating the legacy `statistics.yesim_appsflyer_raw_events` table (co-existence is fine).
 - Building analytics/BI on top of the loaded data (out of scope for this ticket).
-- **Making the installs/installs_retarget tables live in production (BAF-11 stage 4 scope note).**
-  This stage registers the `ReportSpec`s and creates the table shape (usable manually and via
-  `--dry-run`); it does not enable installs in the scheduled daily/backfill timer. Cutover — running
-  installs against real data on a schedule — is BAF-11 Этап 9, itself gated on the
-  `appsflyer_events_fb` PK/index migration (Этап 7, unrelated to installs' own new
-  `idx_app_attr_install` index, which this stage's DDL already includes). The in-app-events
-  exact-duplicate-collapse dedupe-policy question (Этап 8b) is likewise untouched by this stage.
+- **Alerting beyond the journald stub** (issue #16) and the streaming loader/transform the
+  BAF-11 master plan's Этап 4 sketched — a full-mode day measures ~25k rows and a full backfill
+  under 1M, so neither is needed to ship; the stub stays by decision (2026-09-07).
+- The in-app-events exact-duplicate-collapse dedupe policy (Этап 8b) and installs' dedupe key —
+  both flagged for Mark/data-analytics sign-off, neither blocks the cutover (`docs/RUNBOOK.md` §15).
 
 ## Requirements
 
@@ -88,9 +89,13 @@
           MariaDB: analytics_statistics.appsflyer_events_fb
 ```
 
-- **Backfill:** window = [today − 90d, yesterday] (subject to the conflict below), split into ≤31-day
-  chunks; each chunk pulled from both sources, transformed, and loaded independently — a chunk failure
-  doesn't roll back earlier chunks (idempotent replay is cheap and safe).
+- **Backfill:** the nominal request is [today − 90d, yesterday] (`MAX_RETENTION_DAYS`, the API's
+  HTTP 400 boundary), but every `ReportSpec` hard-clamps its own start to AppsFlyer's documented
+  *availability* window — **31 days for in-app events, 60 for installs** (BAF-11 stage 5; see
+  Risks) — so a no-args backfill fetches exactly what the API still serves: one ≤31-day chunk per
+  in-app-events combo, two per installs combo. Each chunk is pulled, transformed, and loaded
+  independently — a chunk failure doesn't roll back earlier chunks (idempotent replay is cheap and
+  safe).
 - **Daily:** window = [yesterday − (N−1), yesterday], N = `APPSFLYER_DAILY_LOOKBACK_DAYS`
   (default 1, i.e. the original [yesterday, yesterday] — issue #8); same client/transform/load
   path as one backfill chunk. An explicit `--date` pulls exactly that one day (targeted repair),
@@ -101,10 +106,10 @@
 - **CLI:** `appsflyer-pipeline check-connection|create-table|backfill|daily [--dry-run]`.
   `backfill` also accepts `--start-date`/`--end-date` and `daily` accepts `--date` (ISO `YYYY-MM-DD`)
   to override the default window — a deliberate extension beyond the original spec, useful for
-  gap-filling a missed day and for probing what AppsFlyer actually returns before its 90-day
-  retention floor (see the backfill-window risk below). An explicit `--start-date` earlier than the
-  floor is *not* silently clamped — the request proceeds and a warning is logged, since the resulting
-  behavior is itself evidence toward resolving that open question.
+  gap-filling a missed day. An explicit `--start-date` before a report's availability floor is
+  clamped up to it with a WARNING (a window entirely before the floor is skipped, not fetched) —
+  since BAF-11 stage 5 there is nothing to learn from probing below it (AppsFlyer documents the
+  window, see Risks) and everything to lose (a valid-empty response would replace our only copy).
 - **Config (env / `.env`):** see `.env.example` — `DB_HOST/PORT/USER/PASSWORD/NAME/TABLE`,
   `DB_TABLE_INSTALLS` (BAF-11 stage 4 — installs/installs_retarget's own table, same validation as
   `DB_TABLE`), `APPSFLYER_API_TOKEN`, `APPSFLYER_APP_IDS`, `APPSFLYER_MEDIA_SOURCE`,
@@ -145,9 +150,9 @@
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| **Ticket asks for backfill from 2025-01-01, but the Pull API retains only 90 days** (Mark's comment) | AC as written is unsatisfiable via this API | **Blocking — needs stakeholder decision** (accept rolling ~90-day backfill, or source pre-90-day history from AppsFlyer Data Locker/raw export/legacy table). Pipeline built to backfill the full available window; gap is flagged, not silently dropped. |
+| **Availability window is shorter than the 90-day request boundary** — AppsFlyer serves **31 days of in-app events and 60 days of installs** ("Data availability windows", support.appsflyer.com, read 2026-09-07; subscription-dependent). Requests between that window and 90 days return HTTP 200 with a valid header and **zero rows** (issue #45's ~35-day observation, 2026-07-09); beyond 90 days, HTTP 400. | Our table is the only copy of anything older than the window. A default 90-day backfill, or any re-run over an old window, would replace it with the valid empty at exit 0. BAF-2's "backfill from 2025-01-01" is unsatisfiable via this API — closed, not pending. | **BAF-11 stage 5:** every `ReportSpec` hard-clamps its fetch start to its own window (`reports.IN_APP_EVENTS_AVAILABILITY_DAYS=31`, `INSTALLS_AVAILABILITY_DAYS=60`; windows entirely before it are skipped with a WARNING), and `load_events` **refuses** an empty load into a populated window (`PipelineError`, a FAILED window, exit 1) unless `allow_wipe=True`. The 400 boundary stays as `MAX_RETENTION_DAYS=90` for the nominal request and the run-level warning only. |
 | AppsFlyer API rate limits / transient 5xx | Chunk pull fails mid-backfill | `tenacity` retry with exponential backoff + jitter; chunk-level isolation means a retry doesn't redo the whole backfill. |
-| **AppsFlyer's daily report-download quota** (confirmed live, Stage 7: `HTTP 400 "You've reached your maximum number of in-app event reports that can be downloaded today for this app"`) | One (app_id, attribution_type) combo fails for the rest of that calendar day | This is a plain 4xx, not 429/5xx, so it correctly fails fast rather than retrying (retrying would just fail again immediately). Chunk-level isolation means only the affected combo is skipped — confirmed live twice (Stage 7): 11/12 backfill windows still loaded, and separately 2/4 `daily` windows. The quota appears to trip per (app_id, attribution_type) after roughly 6-7 report downloads in a single day — heavy same-day testing (dry-run previews *and* real runs *and* manual preflight checks, all against the same app/attribution pairs) exhausts it fast. Fix is time, not retries: re-run just the affected window(s) (`backfill --start-date/--end-date`) once the quota resets the next day. Operational takeaway: during any first-time or heavy manual testing, prefer going straight to a real (non-dry-run) call over a dry-run-then-real pair, and avoid re-running the same window/app repeatedly within one day. |
+| **AppsFlyer's daily report-download quota** (confirmed live, Stage 7: `HTTP 400 "You've reached your maximum number of in-app event reports that can be downloaded today for this app"`; documented in "Report generation quotas", support.appsflyer.com) | One (app_id, report type) combo fails for the rest of that UTC day | The quota is **per report type × app × calendar day (00:00 UTC = 03:00 Europe/Riga)**, plus an account-level cap; advertiser values are subscription-dependent and unpublished (~6-7/day measured for in-app events). It counts **calls, not rows** — a 31-day chunk and a `--dry-run` each cost one — and in-app events, in-app events retargeting, installs and installs retargeting are **four separate quotas**, so adding installs did not shrink the in-app-events budget. The raw-data export page in the AppsFlyer UI has its own separate quota (manual UI exports don't compete with us; Pull API scripts using the same token do). This is a plain 4xx, not 429/5xx, so it correctly fails fast; chunk-level isolation skips only the affected combo. A full-mode cutover day costs ≤3 calls per combo (daily 1 + backfill 1 in-app / 2 installs) — the only way to trip it is repeated same-day testing on the same combo. Fix is time, not retries: re-run just the failed window(s) after 03:00 Riga. See `docs/RUNBOOK.md` §9. |
 | **Late/offline-cached events arrive after the daily pull** (the 05:00 +03 timer = exactly AppsFlyer's documented 02:00 UTC late-event boundary; SDK-cached events from offline devices can arrive days late — issue #8) | Slow, silent under-count of purchases/revenue: a single-day window never revisits past days, and every run still reports success | `APPSFLYER_DAILY_LOOKBACK_DAYS` re-pulls a trailing window daily — zero extra quota at depths ≤31, as long as `APPSFLYER_CHUNK_DAYS` is left at its default (still one report download per combo per run), and idempotent by construction. **Default is 1 (original behavior); production enablement (recommended: 3) is an explicit operator decision, flagged here rather than silently changed.** #10's wipe-visibility logging covers the widened delete window. |
 | Partial load (process killed mid-run) | Inconsistent window state | Delete+insert wrapped in a single DB transaction per window/source — either fully applied or fully rolled back. |
 | Duplicate or re-attributed events on re-pull | Overcounted revenue | Delete-by-window-then-insert makes re-runs idempotent by construction. |
@@ -174,16 +179,16 @@ Mirrors the ticket, restated as testable conditions:
 - [x] `check-connection` succeeds against the analytics MariaDB. (Verified live, Stage 1.)
 - [x] `create-table` creates `analytics_statistics.appsflyer_events_fb` (idempotent). (Verified live,
       Stage 2 — table already existed, schema matched.)
-- [ ] `backfill` loads the full available history (≤90 days back from yesterday) from both API sources.
+- [ ] `backfill` loads the full available history (31 days of in-app events, 60 of installs — the
+      API's documented availability windows, BAF-11 stage 5) from both API sources.
       (First real production run, Stage 7: **11/12 windows loaded (1,285 rows)**; one window —
       `id1458505230` retargeting, 2026-06-09..2026-07-06 — hit AppsFlyer's **daily per-app download
       quota** for in-app event reports (HTTP 400, not a retryable 429/5xx — correctly failed fast per
       design rather than retried) after repeated dry-run + real calls against the same app earlier the
       same day. Chunk-level isolation worked as designed: the other 11 windows were unaffected. Pending
       follow-up: re-run just that window once the quota resets (next day), e.g. `backfill --start-date
-      2026-06-09 --end-date 2026-07-06`. Also see `docs/RUNBOOK.md` §9 for the separate ~90-day
-      retention caveat — this loads the API's retained window, not the ticket's 2025-01-01 ask, which
-      remains open.)
+      2026-06-09 --end-date 2026-07-06`. The ticket's 2025-01-01 ask is closed as unsatisfiable:
+      the API serves 31/60 days, see Risks and `docs/RUNBOOK.md` §9.)
 - [ ] `daily` run (via systemd timer) loads yesterday's data from both sources, unattended. (The `daily`
       command itself is verified live — Stage 5, 136 rows — including idempotent re-runs. The timer is
       now deployed and armed on the target server (as a no-root `systemd --user` stopgap —

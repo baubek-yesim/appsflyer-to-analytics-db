@@ -51,11 +51,14 @@ def test_both_specs_send_event_name_and_media_source_and_no_additional_fields() 
 
 
 def test_both_specs_share_the_in_app_events_table_and_retention() -> None:
-    # BAF-11 stage 4: narrowed from `REPORTS.values()` -- installs has its own
-    # 60-day retention (test_both_installs_specs_have_a_hard_clamped_60_day_retention).
+    # BAF-11 stage 5: 31, not 90 -- AppsFlyer's documented raw-data availability
+    # window for in-app events is "31 out of the last 90 days"
+    # (support.appsflyer.com "Data availability windows"); 90 is only the HTTP
+    # 400 boundary. installs has its own 60-day window
+    # (test_both_installs_specs_have_a_hard_clamped_60_day_retention).
     for key in ("in_app_events_non_organic", "in_app_events_retargeting"):
         spec = REPORTS[key]
-        assert spec.retention_days == 90
+        assert spec.retention_days == 31
         assert spec.window_column == "event_time"
 
 
@@ -158,9 +161,15 @@ def test_both_installs_specs_have_a_hard_clamped_60_day_retention() -> None:
         assert spec.window_column == "install_time"
 
 
-def test_in_app_events_specs_keep_warn_only_retention_unchanged() -> None:
+def test_in_app_events_specs_hard_clamp_to_the_31_day_availability_window() -> None:
+    """BAF-11 stage 5: a request for in-app-events dates older than the 31-day
+    availability window comes back as a valid, header-only EMPTY report
+    (issue #45), and delete-then-insert would then wipe the only copy of that
+    window -- our own table. Warn-and-proceed (stage 4's choice) is no longer
+    acceptable once the full raw export goes live.
+    """
     for key in ("in_app_events_non_organic", "in_app_events_retargeting"):
-        assert REPORTS[key].hard_clamp_retention is False
+        assert REPORTS[key].hard_clamp_retention is True
 
 
 def test_both_installs_specs_have_column_map_none() -> None:
