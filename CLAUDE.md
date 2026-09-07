@@ -134,7 +134,7 @@ Branch/PR numbering below is this ticket's own (`baf-11-stage-N-<slug>`, indepen
 5. Cutover safety (pre-Этап 9, replaces the parts of Этап 4 that the measured volumes actually
    need) — in-app-events hard-clamped to AppsFlyer's documented 31-day availability window (issue
    #45's "~35-day silent empty" explained and closed), `load_events` refuses to wipe a populated
-   window with an empty fetch unless `allow_wipe=True`, `TimeoutStartSec` 1800 → 3600 (issue
+   window with an empty fetch unless `allow_wipe=True`, `TimeoutStartSec` 1800 → 7200 (issue
    #35), RUNBOOK §9 rewritten around the real availability/quota model and §15 added with the
    cutover procedure — done, `baf-11-stage-5-cutover-safety`.
 

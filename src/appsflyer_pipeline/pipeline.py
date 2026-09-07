@@ -52,15 +52,14 @@ def _today() -> datetime.date:
 def _active_retention_days() -> int:
     """The narrowest retention_days across every registered REPORTS entry.
 
-    BAF-11 stage 4: NOT consumed by run_backfill/run_daily's default-window or
-    warn-threshold math -- those use MAX_RETENTION_DAYS instead, since they're
-    about in-app-events' own (hard_clamp_retention=False) floor specifically,
-    and installs (hard_clamp_retention=True, 60 days) already clamps its own
-    effective start inside _iter_work_items regardless of what start/end this
-    function's callers would otherwise compute. Kept as a small, still-correct
-    diagnostic helper (min(...) over REPORTS, currently 60 now that installs
-    is registered) with no production call site -- not dead code to delete,
-    per this stage's plan.
+    NOT consumed by run_backfill/run_daily's default-window or warn-threshold
+    math -- those use MAX_RETENTION_DAYS (the HTTP 400 boundary) instead, and
+    since BAF-11 stage 5 every registered spec hard-clamps its own effective
+    start to its availability window inside _iter_work_items (31 days for
+    in-app events, 60 for installs) regardless of what start/end this
+    function's callers compute. Kept as a small, still-correct diagnostic
+    helper (min(...) over REPORTS, currently 31) with no production call site
+    -- not dead code to delete, per the stage 4 plan.
     """
     return min(spec.retention_days for spec in REPORTS.values())
 
@@ -167,13 +166,13 @@ def _iter_work_items(
         for spec in enabled_specs:
             spec_start = start
             if spec.hard_clamp_retention:
-                # BAF-11 stage 4 (installs): a response past the real
-                # retention boundary can come back as a valid, header-only
-                # EMPTY report (issue #45's shape) -- the idempotent
-                # delete-then-insert would then wipe a window that may have
-                # had real data. In-app-events (hard_clamp_retention=False)
-                # deliberately keeps warn-and-proceed instead -- see this
-                # stage's plan, Architecture decision 3.
+                # BAF-11 stage 4 (installs) / stage 5 (in-app events too): a
+                # response past the report's availability window comes back
+                # as a valid, header-only EMPTY report (issue #45's shape) --
+                # the idempotent delete-then-insert would then wipe a window
+                # that may have had real data. Every registered spec hard-
+                # clamps since stage 5; load_events' refuse-to-wipe guard is
+                # the second line of defence for anything that slips through.
                 retention_floor = _today() - datetime.timedelta(days=spec.retention_days)
                 spec_start = max(start, retention_floor)
                 if spec_start > end:
@@ -326,20 +325,16 @@ def _warn_if_before_retention_floor(day: datetime.date, what: str, *, retention_
     """Issue #28: the floor anchors to TODAY (the API retains a trailing
     window), never to a caller-provided end date -- an explicit past
     --end-date used to skip this warning for fully-beyond-retention windows.
-    Warn-and-proceed is deliberate (RUNBOOK §9's probes rely on it). This is
-    the API's documented/HTTP-400 boundary; the *silent* empty-response
-    boundary is shorter -- see issue #45.
+    This is the API's HTTP-400 boundary (MAX_RETENTION_DAYS), a run-level
+    heads-up only: the *availability* floors are shorter (31 days in-app
+    events, 60 installs -- issue #45, RUNBOOK §9) and since BAF-11 stage 5
+    every registered spec hard-clamps to its own floor inside
+    `_iter_work_items`, so "proceeding" here never sends a request for dates
+    the source no longer serves.
 
     `retention_days` is a caller-supplied parameter, not a module-level
-    constant (BAF-11 stage 3) -- since BAF-11 stage 4, every call site passes
-    `MAX_RETENTION_DAYS` (in-app-events' own retention), not
-    `_active_retention_days()`'s cross-REPORTS minimum: this warning is about
-    the `hard_clamp_retention=False` specs' warn-and-proceed floor
-    specifically, and installs (`hard_clamp_retention=True`) never reaches
-    this function -- it clamps itself inside `_iter_work_items` instead. Kept
-    as a parameter (not hardcoded to `MAX_RETENTION_DAYS` directly) so a
-    future `hard_clamp_retention=False` report with a different retention can
-    still call this correctly.
+    constant (BAF-11 stage 3); every call site passes `MAX_RETENTION_DAYS`,
+    not `_active_retention_days()`'s cross-REPORTS minimum.
     """
     retention_floor = _today() - datetime.timedelta(days=retention_days)
     if day < retention_floor:
@@ -430,32 +425,26 @@ def run_backfill(
     *,
     dry_run: bool = False,
 ) -> RunSummary:
-    """Historical backfill. Defaults to the full available AppsFlyer window:
-    [yesterday - (MAX_RETENTION_DAYS - 1), yesterday].
+    """Historical backfill. Defaults to the widest window the API accepts at
+    all: [yesterday - (MAX_RETENTION_DAYS - 1), yesterday]. Each report then
+    narrows its own effective start to its availability window inside
+    `_iter_work_items` (BAF-11 stage 5: 31 days for in-app events, 60 for
+    installs), logging a `clamping ...` WARNING per (app, report) it touched
+    -- so a no-args backfill fetches exactly what the source still serves and
+    never sends a request whose valid-but-empty answer would wipe our only
+    copy of older rows (issue #45).
 
-    If an explicit `start` predates the retention floor (today minus
-    MAX_RETENTION_DAYS, in-app-events' own retention — this run-level default/
-    warn threshold is about in-app-events specifically, not the cross-REPORTS
-    minimum; see the BAF-11 stage 4 comment below), this does NOT clamp it —
-    it logs a warning and proceeds, so an operator can deliberately probe what
-    AppsFlyer actually returns for old dates (see RUNBOOK §9 and issue #45).
-    installs (hard_clamp_retention=True) is unaffected by this: it clamps its
-    own effective start inside `_iter_work_items` regardless of this
-    function's `start`/`end`.
+    An explicit `start` before the MAX_RETENTION_DAYS floor is warned about
+    at run level too (`_warn_if_before_retention_floor`) but is NOT rejected;
+    it is still clamped per report like any other start. A window that ends
+    before every report's floor yields an empty RunSummary, not an error.
     """
-    # BAF-11 stage 4: do NOT use _active_retention_days() (the cross-REPORTS
-    # minimum) here. Once installs (retention_days=60, hard_clamp_retention=
-    # True) is registered, that minimum drops from 90 to 60 -- but installs
-    # already clamps its OWN effective start inside _iter_work_items
-    # regardless of what start this function resolves to (Architecture
-    # decision 3). Keying the run-level default/warn threshold off the global
-    # minimum would silently narrow in-app-events' no-args default window
-    # from 90 days to 60, contradicting this stage's regression bar
-    # (in-app-events' warn-only retention behavior stays byte-for-byte
-    # unchanged) -- caught by test_run_backfill_default_window_is_90_days.
-    # MAX_RETENTION_DAYS is what this caller-facing default/warn threshold is
-    # actually about: the widest retention among hard_clamp_retention=False
-    # specs (today, in-app-events only).
+    # Do NOT use _active_retention_days() (the cross-REPORTS minimum) here:
+    # the run-level default is the HTTP-400 boundary, and per-report clamping
+    # inside _iter_work_items is what turns it into each report's real
+    # window. Keying the default off the global minimum would narrow installs'
+    # 60-day window to in-app events' 31 -- caught by
+    # test_installs_retention_floor_is_60_not_90.
     end = end or (_today() - datetime.timedelta(days=1))
     default_start = end - datetime.timedelta(days=MAX_RETENTION_DAYS - 1)
     start = start or default_start
@@ -483,10 +472,9 @@ def run_daily(*, date: datetime.date | None = None, dry_run: bool = False) -> Ru
     straight onto the API's event-time from/to params, like the reference
     script's from_date/to_date arguments, with TO defaulting to yesterday.
     """
-    # BAF-11 stage 4: same reasoning as run_backfill above -- MAX_RETENTION_DAYS,
-    # not _active_retention_days()'s cross-REPORTS minimum. installs clamps
-    # itself inside _iter_work_items; these two warn call sites are about
-    # in-app-events' own (hard_clamp_retention=False) floor.
+    # Same reasoning as run_backfill above -- MAX_RETENTION_DAYS (the HTTP-400
+    # boundary), not _active_retention_days()'s cross-REPORTS minimum; every
+    # report clamps itself to its availability window inside _iter_work_items.
     if date is not None:
         _warn_if_before_retention_floor(date, "daily --date", retention_days=MAX_RETENTION_DAYS)
         return _run_window(date, date, dry_run=dry_run)

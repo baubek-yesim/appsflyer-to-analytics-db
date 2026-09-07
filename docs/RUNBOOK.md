@@ -341,7 +341,7 @@ monitor alert on missed pings.
 | WARNING `clamping <report> ... before the N-day retention floor` / `skipping <report> ... entirely before` | The requested window reaches past that report's availability window (31 days in-app events, 60 installs — §9) | Expected for a no-args `backfill`. Nothing to fix; the data simply no longer exists at the source. |
 | `PipelineError: refusing to wipe populated window ... fetched 0 rows but N already loaded` (a FAILED window, exit 1) | AppsFlyer returned a valid-but-empty report for a window we hold rows for — an upstream anomaly, or an availability-floor edge (issue #45) | Nothing was deleted. Re-run the window later; if the source has genuinely gone to zero for that window and you want ours to match, that is a deliberate manual `DELETE` (or `load_events(..., allow_wipe=True)` from a Python shell), not a pipeline re-run. |
 | `AppsFlyerAPIError: ... empty response body` or `TransformError: ... missing expected column(s)` on a window that used to load fine | AppsFlyer sent an anomalous 200 (truly empty or error-text body), or the export's header set drifted — a legitimate empty report always carries the full CSV header row (issue #26, live-verified 2026-07-09) | Nothing was deleted — the window's previously loaded rows are intact. Re-run just that window with `--dry-run` to inspect; if AppsFlyer renamed columns, update `reports._IN_APP_EVENTS_COLUMN_MAP`; otherwise re-run the window once the upstream anomaly clears. |
-| Job killed / times out | `TimeoutStartSec` too low for a slow AppsFlyer day | 3600s for daily (sized from the retry policy's worst case, issue #35) / 10800s for backfill in the §9 example; raise further if needed. |
+| Job killed / times out | `TimeoutStartSec` too low for a slow AppsFlyer day | 7200s for daily (8 full-mode windows × the retry policy's ~10 min worst case ≈ 83 min, plus headroom — issue #35) / 10800s for backfill in the §9 example; raise further if needed. |
 | `SIGSYS` or crash right at startup | A hardening directive is too tight | Comment out `MemoryDenyWriteExecute` if enabled, then loosen `SystemCallFilter`; `daemon-reload` and retry. |
 | `status=218/CAPABILITIES`, "Failed to drop capabilities" (user-level unit, §14) | `ProtectClock`/`ProtectKernelModules`/`ProtectKernelLogs` in a `systemd --user` unit on a host that forbids unprivileged user namespaces (Ubuntu 24.04 ships `kernel.apparmor_restrict_unprivileged_userns=1`) — hit live on the first scheduled fire, issue #19 | Remove those three directives from the user-level unit only (they're security no-ops without root anyway; the root-based unit keeps them). Re-copy to `~/.config/systemd/user/`, `systemctl --user daemon-reload`, then `systemctl --user start appsflyer-daily.service` once to confirm and to load the day the failed fire missed. |
 
@@ -481,7 +481,7 @@ Pull API scripts on days D..D+2 (UI exports are fine, separate quota).
    `appsflyer_events_fb` (the production table was recreated on 2026-07-10 without its PK/index —
    §6). `power_bi_user` holds `INDEX, ALTER` (verified 2026-08-13). Verify:
    `SHOW INDEX FROM appsflyer_events_fb` lists `idx_app_attr_time`.
-6. Install the updated unit (`TimeoutStartSec=3600`):
+6. Install the updated unit (`TimeoutStartSec=7200`):
    `cp deploy/user-level/appsflyer-daily.service ~/.config/systemd/user/ && systemctl --user daemon-reload`
 7. **Run nothing by hand.** The next scheduled fire (D+1, 05:00) is the test: new code, old
    filters, expect `4/4 windows OK` and a `filters: media_source=Facebook Ads, event_names=...`
