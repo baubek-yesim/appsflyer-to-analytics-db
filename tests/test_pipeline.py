@@ -115,6 +115,18 @@ def _clear_settings_cache_after() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _pin_today(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BAF-11 stage 5: every spec hard-clamps its window to today minus its
+    availability floor, so a test that pulls a fixed 2026-05-xx window without
+    pinning `_today` would see that window silently clamped away once the
+    real calendar moved past it. Pin a default "today" just after the
+    fixtures' dates; a test that needs a different one overrides it inline
+    (a later monkeypatch.setattr on the same target wins).
+    """
+    monkeypatch.setattr(pipeline, "_today", lambda: datetime.date(2026, 5, 21))
+
+
+@pytest.fixture(autouse=True)
 def _stub_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
     """A non-dry-run call triggers _run_window's preflight check_connection,
     which would otherwise try a real connection to the fake DB host. Stub it
@@ -175,18 +187,20 @@ def test_iter_work_items_yields_expected_matrix(monkeypatch: pytest.MonkeyPatch)
     retargeting), so `one_series` must also pin `spec.name` -- otherwise it
     matches both in-app-events' and installs' non_organic specs and the
     per-series chunk count silently doubles. The window is deliberately
-    pinned recent (within installs' 60-day hard-clamp floor) so installs'
-    clamp is a no-op here and the cross-REPORTS `len(items)` equality holds.
+    pinned recent (within in-app-events' 31-day hard-clamp floor, the
+    narrowest since BAF-11 stage 5) so every spec's clamp is a no-op here and
+    the cross-REPORTS `len(items)` equality holds; the chunk size is narrowed
+    to 15 days so a 30-day window still exercises multi-chunk splitting.
     Every spec is opted in explicitly (APPSFLYER_ENABLED_REPORTS): the default
     enables only the two in-app-events specs, so without this the matrix this
     test is about would never include installs at all.
     """
-    _set_env(monkeypatch, APPSFLYER_ENABLED_REPORTS=ALL_REPORTS_ENABLED)
+    _set_env(monkeypatch, APPSFLYER_ENABLED_REPORTS=ALL_REPORTS_ENABLED, APPSFLYER_CHUNK_DAYS="15")
     settings = get_settings()
     fixed_today = datetime.date(2026, 6, 1)
     monkeypatch.setattr(pipeline, "_today", lambda: fixed_today)
-    start = datetime.date(2026, 4, 10)  # within installs' 60-day floor (2026-04-02)
-    end = datetime.date(2026, 5, 31)  # 51 days -> 2 chunks of <=31 days each
+    start = datetime.date(2026, 5, 2)  # within in-app-events' 31-day floor (2026-05-01)
+    end = datetime.date(2026, 5, 31)  # 30 days -> 2 chunks of <=15 days each
     items = list(_iter_work_items(settings, start, end))
 
     assert {app_id for _, app_id, _, _ in items} == set(APP_IDS)
@@ -200,7 +214,8 @@ def test_iter_work_items_yields_expected_matrix(monkeypatch: pytest.MonkeyPatch)
     ]
     assert one_series[0][0] == start
     assert one_series[-1][1] == end
-    assert all((e - s).days < 31 for s, e in one_series)
+    assert len(one_series) == 2
+    assert all((e - s).days < 15 for s, e in one_series)
     assert len(items) == len(APP_IDS) * len(REPORTS) * len(one_series)
 
 
@@ -212,7 +227,7 @@ def test_iter_work_items_respects_configured_chunk_days(
     5)."""
     _set_env(monkeypatch, APPSFLYER_CHUNK_DAYS="10")
     settings = get_settings()
-    fixed_today = datetime.date(2026, 2, 15)
+    fixed_today = datetime.date(2026, 2, 1)  # 31-day floor = 2026-01-01 = start, no clamp
     monkeypatch.setattr(pipeline, "_today", lambda: fixed_today)
     start = datetime.date(2026, 1, 1)
     end = datetime.date(2026, 1, 31)  # 31 days -> 4 chunks of <=10 days each
@@ -419,16 +434,24 @@ def test_run_daily_isolates_error_text_200_body(
     assert len(load_spy) == 3  # the failed unit never reaches load_events
 
 
-def test_run_backfill_default_window_is_90_days(
-    monkeypatch: pytest.MonkeyPatch, load_spy: list[dict[str, Any]]
+def test_run_backfill_default_window_clamps_in_app_events_to_the_31_day_floor(
+    monkeypatch: pytest.MonkeyPatch,
+    load_spy: list[dict[str, Any]],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """BAF-11 stage 5: the no-args backfill still *requests* the nominal
+    90-day window (MAX_RETENTION_DAYS, the HTTP 400 boundary), but every
+    in-app-events chunk actually fetched starts no earlier than today - 31
+    days -- AppsFlyer's documented availability window for in-app events.
+    Dates before it come back as valid empties and would wipe our only copy.
+    """
     _set_env(monkeypatch)
     fixed_today = datetime.date(2026, 7, 7)
     monkeypatch.setattr(pipeline, "_today", lambda: fixed_today)
     expected_end = fixed_today - datetime.timedelta(days=1)
-    expected_start = expected_end - datetime.timedelta(days=MAX_RETENTION_DAYS - 1)
+    expected_start = fixed_today - datetime.timedelta(days=31)
 
-    with respx.mock:
+    with caplog.at_level(logging.WARNING, logger="appsflyer_pipeline.pipeline"), respx.mock:
         _mock_all_ok()
         summary = run_backfill(dry_run=True)
 
@@ -436,6 +459,7 @@ def test_run_backfill_default_window_is_90_days(
     ends = {r.end_date for r in summary.results}
     assert min(starts) == expected_start
     assert max(ends) == expected_end
+    assert any("clamping in_app_events" in record.message for record in caplog.records)
 
 
 def test_run_backfill_rejects_start_after_end(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -444,11 +468,16 @@ def test_run_backfill_rejects_start_after_end(monkeypatch: pytest.MonkeyPatch) -
         run_backfill(start=datetime.date(2026, 5, 20), end=datetime.date(2026, 5, 1))
 
 
-def test_run_backfill_warns_but_does_not_clamp_early_start(
+def test_run_backfill_warns_and_clamps_early_start(
     monkeypatch: pytest.MonkeyPatch,
     load_spy: list[dict[str, Any]],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """BAF-11 stage 5: an explicit --start-date before the availability window
+    still gets the run-level 90-day-floor warning (issue #28), and the
+    in-app-events chunks are clamped up to today - 31 days -- never fetched
+    below it, so the valid-empty responses past the floor can't wipe anything.
+    """
     _set_env(monkeypatch)
     fixed_today = datetime.date(2026, 7, 7)
     monkeypatch.setattr(pipeline, "_today", lambda: fixed_today)
@@ -460,8 +489,9 @@ def test_run_backfill_warns_but_does_not_clamp_early_start(
         summary = run_backfill(start=very_early_start, end=end, dry_run=True)
 
     assert any("retention floor" in record.message for record in caplog.records)
+    assert any("clamping in_app_events" in record.message for record in caplog.records)
     starts = {r.start_date for r in summary.results}
-    assert min(starts) == very_early_start  # NOT silently clamped
+    assert min(starts) == fixed_today - datetime.timedelta(days=31)  # clamped, loudly
 
 
 def test_run_daily_defaults_to_yesterday(
@@ -560,7 +590,11 @@ def test_run_backfill_warns_for_fully_beyond_floor_window_with_explicit_past_end
         )
 
     assert any("retention floor" in record.message for record in caplog.records)
-    assert min(r.start_date for r in summary.results) == datetime.date(2026, 3, 1)  # not clamped
+    # BAF-11 stage 5: a window entirely before the 31-day availability floor is
+    # skipped outright (loudly), not fetched -- nothing AppsFlyer would return
+    # for it could be anything but a valid empty, and a valid empty wipes.
+    assert summary.results == []
+    assert any("entirely before" in record.message for record in caplog.records)
 
 
 def test_run_daily_explicit_old_date_warns(
@@ -577,7 +611,10 @@ def test_run_daily_explicit_old_date_warns(
         summary = run_daily(date=datetime.date(2026, 2, 1), dry_run=True)
 
     assert any("retention floor" in record.message for record in caplog.records)
-    assert all(r.start_date == datetime.date(2026, 2, 1) for r in summary.results)
+    # BAF-11 stage 5: the old --date is also before the 31-day availability
+    # floor, so it is skipped rather than fetched (see the backfill twin above).
+    assert summary.results == []
+    assert any("entirely before" in record.message for record in caplog.records)
 
 
 def test_run_daily_recent_date_does_not_warn(
@@ -710,13 +747,14 @@ def test_run_daily_old_event_time_from_warns(
     assert any("retention floor" in record.message for record in caplog.records)
 
 
-def test_iter_work_items_hard_clamps_installs_but_not_in_app_events(
+def test_iter_work_items_hard_clamps_in_app_events_to_31_days_and_installs_to_60(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Architecture decision 3: installs (hard_clamp_retention=True, 60 days)
-    gets its start date clamped up to the retention floor; in-app-events
-    (hard_clamp_retention=False, 90 days) keeps warn-and-proceed -- its
-    chunks still start at the caller's requested start regardless.
+    """BAF-11 stage 5: both report families hard-clamp their start date to
+    their own documented availability window -- 31 days for in-app events,
+    60 for installs (support.appsflyer.com "Data availability windows").
+    Stage 4 had in-app-events on warn-and-proceed; that ended when the full
+    raw export made our table the only copy of anything older than 31 days.
     """
     _set_env(monkeypatch, APPSFLYER_ENABLED_REPORTS=ALL_REPORTS_ENABLED)
     settings = get_settings()
@@ -732,11 +770,11 @@ def test_iter_work_items_hard_clamps_installs_but_not_in_app_events(
     }
     installs_starts = {s for spec, a, s, e in items if a == "app1" and spec.name == "installs"}
 
-    assert min(in_app_events_starts) == start  # unclamped -- 100 days back, unchanged
+    assert min(in_app_events_starts) == fixed_today - datetime.timedelta(days=31)  # hard-clamped
     assert min(installs_starts) == fixed_today - datetime.timedelta(days=60)  # hard-clamped
 
 
-def test_iter_work_items_skips_installs_entirely_when_window_is_fully_before_the_floor(
+def test_iter_work_items_skips_every_report_when_window_is_fully_before_its_floor(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     _set_env(monkeypatch, APPSFLYER_ENABLED_REPORTS=ALL_REPORTS_ENABLED)
@@ -749,21 +787,23 @@ def test_iter_work_items_skips_installs_entirely_when_window_is_fully_before_the
     with caplog.at_level(logging.WARNING, logger="appsflyer_pipeline.pipeline"):
         items = list(_iter_work_items(settings, start, end))
 
-    installs_items = [i for i in items if i[0].name == "installs"]
-    in_app_events_items = [i for i in items if i[0].name == "in_app_events"]
-    assert installs_items == []  # nothing to fetch -- entirely before the hard floor
-    assert len(in_app_events_items) > 0  # in-app-events is unaffected (90-day retention)
-    assert any("entirely before" in r.message for r in caplog.records)
+    # BAF-11 stage 5: nothing to fetch for either family -- the window is
+    # entirely before both the 31-day (in-app-events) and 60-day (installs)
+    # availability floors.
+    assert items == []
+    skipped = [r.message for r in caplog.records if "entirely before" in r.message]
+    assert any("skipping in_app_events" in m for m in skipped)
+    assert any("skipping installs" in m for m in skipped)
 
 
-def test_active_retention_days_narrows_to_installs_60_once_registered() -> None:
-    """No code change needed for this -- Stage 3's min(...)-based
-    _active_retention_days() already does the right thing once REPORTS grows
-    to include a 60-day spec. This test just locks in that it actually does.
+def test_active_retention_days_is_the_31_day_in_app_events_window() -> None:
+    """Stage 3's min(...)-based _active_retention_days() follows the registry:
+    60 while installs was the narrowest spec (stage 4), 31 since stage 5 set
+    in-app-events to its documented availability window.
     """
     from appsflyer_pipeline.pipeline import _active_retention_days
 
-    assert _active_retention_days() == 60
+    assert _active_retention_days() == 31
 
 
 def test_run_backfill_default_window_uses_max_retention_days_not_the_cross_report_minimum(
@@ -1111,4 +1151,5 @@ def test_installs_retention_floor_is_60_not_90(monkeypatch: pytest.MonkeyPatch) 
         s for spec, a, s, e in items if a == "app1" and spec.name == "in_app_events"
     }
     assert min(installs_starts) == fixed_today - datetime.timedelta(days=60)
-    assert min(in_app_events_starts) == start  # 80 days back, well within in-app-events' 90
+    # BAF-11 stage 5: 80 days back is past in-app-events' 31-day window too.
+    assert min(in_app_events_starts) == fixed_today - datetime.timedelta(days=31)

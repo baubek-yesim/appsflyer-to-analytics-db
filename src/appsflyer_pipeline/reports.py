@@ -13,7 +13,8 @@ dataclass exposes -- installs sends no `event_name`, requests 47
 `additional_fields`, maps its columns by normalization rather than a
 hand-written dict (`column_map=None`), keys its dedup on
 `(appsflyer_id, event_time)`, windows on `install_time`, and hard-clamps its
-own start date to a 60-day retention floor instead of warning and proceeding.
+own start date to a 60-day availability floor. Since stage 5 in-app-events
+hard-clamps too, to its own 31-day floor -- see IN_APP_EVENTS_AVAILABILITY_DAYS.
 
 Registered is not the same as enabled: `Settings.appsflyer_enabled_reports`
 (stage 4) decides which of these entries a backfill/daily run may actually
@@ -35,7 +36,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from appsflyer_pipeline.appsflyer_client import MAX_RETENTION_DAYS, AttributionType
+from appsflyer_pipeline.appsflyer_client import AttributionType
 from appsflyer_pipeline.config import Settings
 from appsflyer_pipeline.transform import DEDUPE_DISCRIMINATOR_ROW_KEY, normalize_column_name
 
@@ -64,12 +65,27 @@ class ReportSpec:
     # column name is a mypy/runtime error at the definition site, not a
     # silently-wrong tuple discovered downstream.
     dedupe_key: Callable[[dict[str, Any]], tuple[Any, ...]]
-    # True only for installs -- see this plan's Architecture decision 3.
-    # In-app-events stays False: _iter_work_items must keep yielding
-    # chunk_start == the caller's requested start regardless of how old it
-    # is, preserving the existing warn-and-proceed-past-the-floor behavior
-    # RUNBOOK §9's probes rely on (Stage 3 Architecture decision 6).
+    # True for every registered spec since BAF-11 stage 5 (installs since
+    # stage 4; in-app-events kept warn-and-proceed until the full raw export
+    # made our table the only copy of anything older than its 31-day window).
+    # Kept as a field rather than removed so a future spec can opt out
+    # deliberately, and so _iter_work_items' clamp stays data-driven.
     hard_clamp_retention: bool
+
+
+# AppsFlyer's documented raw-data *availability* windows (support.appsflyer.com,
+# "Data availability windows", read 2026-09-07) -- distinct from the 90-day
+# HTTP 400 boundary appsflyer_client.MAX_RETENTION_DAYS describes:
+#   in-app events:  "31 out of the last 90 days"
+#   attributions (installs, retargeting conversions): "60 out of the last 90 days"
+# A request for dates between the availability window and the 90-day boundary
+# comes back HTTP 200 with a valid header and zero rows -- indistinguishable
+# from a genuinely quiet window (issue #45, live-observed as a ~35-day floor
+# on 2026-07-09). Every spec hard-clamps its start date to its own window
+# (BAF-11 stage 5): past it, our table is the only copy of the data, and the
+# idempotent delete-then-insert would replace it with that valid empty.
+IN_APP_EVENTS_AVAILABILITY_DAYS = 31
+INSTALLS_AVAILABILITY_DAYS = 60
 
 
 def _in_app_events_table(settings: Settings) -> str:
@@ -320,7 +336,7 @@ REPORTS: dict[str, ReportSpec] = {
         sends_event_name=True,
         sends_media_source=True,
         additional_fields=(),
-        retention_days=MAX_RETENTION_DAYS,
+        retention_days=IN_APP_EVENTS_AVAILABILITY_DAYS,
         column_map=_IN_APP_EVENTS_COLUMN_MAP,
         timestamp_columns=_IN_APP_EVENTS_TIMESTAMP_COLUMNS,
         required_not_null=_IN_APP_EVENTS_REQUIRED_NOT_NULL,
@@ -328,7 +344,7 @@ REPORTS: dict[str, ReportSpec] = {
         insert_columns=_IN_APP_EVENTS_INSERT_COLUMNS,
         window_column="event_time",
         dedupe_key=_in_app_events_dedupe_key,
-        hard_clamp_retention=False,
+        hard_clamp_retention=True,
     ),
     "in_app_events_retargeting": ReportSpec(
         name="in_app_events",
@@ -337,7 +353,7 @@ REPORTS: dict[str, ReportSpec] = {
         sends_event_name=True,
         sends_media_source=True,
         additional_fields=(),
-        retention_days=MAX_RETENTION_DAYS,
+        retention_days=IN_APP_EVENTS_AVAILABILITY_DAYS,
         column_map=_IN_APP_EVENTS_COLUMN_MAP,
         timestamp_columns=_IN_APP_EVENTS_TIMESTAMP_COLUMNS,
         required_not_null=_IN_APP_EVENTS_REQUIRED_NOT_NULL,
@@ -345,7 +361,7 @@ REPORTS: dict[str, ReportSpec] = {
         insert_columns=_IN_APP_EVENTS_INSERT_COLUMNS,
         window_column="event_time",
         dedupe_key=_in_app_events_dedupe_key,
-        hard_clamp_retention=False,
+        hard_clamp_retention=True,
     ),
     "installs_non_organic": ReportSpec(
         name="installs",
@@ -354,7 +370,7 @@ REPORTS: dict[str, ReportSpec] = {
         sends_event_name=False,
         sends_media_source=True,
         additional_fields=INSTALLS_ADDITIONAL_FIELDS,
-        retention_days=60,
+        retention_days=INSTALLS_AVAILABILITY_DAYS,
         column_map=None,
         timestamp_columns=("event_time", "install_time", "attributed_touch_time"),
         required_not_null=("appsflyer_id", "install_time", "event_time"),
@@ -371,7 +387,7 @@ REPORTS: dict[str, ReportSpec] = {
         sends_event_name=False,
         sends_media_source=True,
         additional_fields=INSTALLS_ADDITIONAL_FIELDS,
-        retention_days=60,
+        retention_days=INSTALLS_AVAILABILITY_DAYS,
         column_map=None,
         timestamp_columns=("event_time", "install_time", "attributed_touch_time"),
         required_not_null=("appsflyer_id", "install_time", "event_time"),

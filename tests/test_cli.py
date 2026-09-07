@@ -8,13 +8,24 @@ import respx
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
-from appsflyer_pipeline import cli
+from appsflyer_pipeline import cli, pipeline
 from appsflyer_pipeline.cli import app
 from appsflyer_pipeline.config import Settings, get_settings
 from appsflyer_pipeline.loader import ConnectionStatus, PipelineError
 from appsflyer_pipeline.pipeline import RunSummary
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _pin_today(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BAF-11 stage 5: the pipeline hard-clamps every window to today minus
+    the report's availability floor (31 days for in-app events), so the fixed
+    2026-05-20 windows these CLI tests request must be seen from a pinned
+    "today" or they'd be silently clamped away as the calendar moves on.
+    """
+    monkeypatch.setattr(pipeline, "_today", lambda: datetime.date(2026, 5, 21))
+
 
 UNREACHABLE_ENV = {
     "DB_HOST": "127.0.0.1",
@@ -346,18 +357,19 @@ def test_backfill_invalid_start_date_fails_fast(monkeypatch: pytest.MonkeyPatch)
 
 
 @respx.mock
-def test_backfill_early_start_is_not_silently_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The CLI doesn't silently clamp/reject a pre-retention-floor start date --
-    it still attempts the window. (The pipeline-level warning log is asserted
-    via caplog in test_pipeline.py; raw `logging` output isn't reliably
-    capturable through CliRunner's per-invocation stdout redirection once
-    configure_logging()'s handler is already bound from an earlier test.)
+def test_backfill_window_entirely_before_the_floor_is_skipped_not_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BAF-11 stage 5: a window entirely before every report's availability
+    floor is not an error -- the run exits 0 having fetched nothing (0/0
+    windows), and the pipeline-level "skipping ... entirely before" warning is
+    asserted via caplog in test_pipeline.py. Raw `logging` output isn't
+    reliably capturable through CliRunner's per-invocation stdout redirection
+    once configure_logging()'s handler is already bound from an earlier test.
+    Nothing is fetched, so no AppsFlyer route is mocked: a request here would
+    be a regression (respx would raise on the unmatched call).
     """
     _set_cli_env(monkeypatch)
-    for attribution_type in ("non_organic", "retargeting"):
-        respx.get(_af_url("app1", attribution_type)).mock(
-            return_value=httpx.Response(200, text=SAMPLE_CSV)
-        )
 
     result = runner.invoke(
         app,
@@ -366,7 +378,7 @@ def test_backfill_early_start_is_not_silently_rejected(monkeypatch: pytest.Monke
 
     get_settings.cache_clear()
     assert result.exit_code == 0
-    assert "2020-01-01" in result.output
+    assert "0/0 windows" in result.output
 
 
 @respx.mock
