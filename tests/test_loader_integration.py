@@ -20,7 +20,13 @@ import pytest
 from sqlalchemy import text
 
 from appsflyer_pipeline.config import get_settings
-from appsflyer_pipeline.loader import check_connection, create_engine, create_table, load_events
+from appsflyer_pipeline.loader import (
+    PipelineError,
+    check_connection,
+    create_engine,
+    create_table,
+    load_events,
+)
 from appsflyer_pipeline.reports import REPORTS
 
 
@@ -161,7 +167,8 @@ def test_load_events_is_idempotent_and_isolated() -> None:
         assert count2 == 1
         assert actual_count == 1  # second load replaced, not duplicated
     finally:
-        # Delete-only call for the same window cleans up regardless of outcome.
+        # Delete-only call for the same window cleans up regardless of outcome
+        # (BAF-11 stage 5: an empty load must opt into wiping a populated window).
         load_events(
             engine,
             REPORTS["in_app_events_non_organic"],
@@ -170,6 +177,7 @@ def test_load_events_is_idempotent_and_isolated() -> None:
             app_id=test_app_id,
             start_date=window_start,
             end_date=window_end,
+            allow_wipe=True,
         )
 
 
@@ -226,6 +234,34 @@ def test_load_events_logs_rowcounts_and_warns_on_wipe(
         assert any("deleted=0" in r.message and "inserted=1" in r.message for r in caplog.records)
         assert not any(r.levelno == logging.WARNING for r in caplog.records)
 
+        # BAF-11 stage 5 (issue #45): re-loading the now-populated window with
+        # zero rows is REFUSED by default -- the rows survive, the caller gets
+        # a PipelineError (a FAILED window), and the refusal is loud.
+        caplog.clear()
+        with (
+            caplog.at_level(logging.INFO, logger="appsflyer_pipeline.loader"),
+            pytest.raises(PipelineError, match="refusing to wipe"),
+        ):
+            load_events(
+                engine,
+                REPORTS["in_app_events_non_organic"],
+                settings.db_table,
+                [],
+                app_id=test_app_id,
+                start_date=window,
+                end_date=window,
+            )
+        with engine.connect() as conn:
+            survivors = conn.execute(
+                text(
+                    f"SELECT COUNT(*) FROM `{settings.db_table}` "
+                    "WHERE app_id = :app_id AND attribution_type = :attribution_type"
+                ),
+                {"app_id": test_app_id, "attribution_type": test_attribution},
+            ).scalar_one()
+        assert survivors == 1
+
+        # With allow_wipe=True the pre-stage-5 behavior applies: wipe, and WARN.
         caplog.clear()
         with caplog.at_level(logging.INFO, logger="appsflyer_pipeline.loader"):
             load_events(
@@ -236,8 +272,8 @@ def test_load_events_logs_rowcounts_and_warns_on_wipe(
                 app_id=test_app_id,
                 start_date=window,
                 end_date=window,
+                allow_wipe=True,
             )
-        # Re-loading the now-populated window with zero rows is a wipe: WARN.
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warnings) == 1
         assert "wiped" in warnings[0].message
@@ -248,7 +284,8 @@ def test_load_events_logs_rowcounts_and_warns_on_wipe(
             if r.levelno == logging.INFO
         )
     finally:
-        # Delete-only call for the same window cleans up regardless of outcome.
+        # Delete-only call for the same window cleans up regardless of outcome
+        # (BAF-11 stage 5: an empty load must opt into wiping a populated window).
         load_events(
             engine,
             REPORTS["in_app_events_non_organic"],
@@ -257,4 +294,5 @@ def test_load_events_logs_rowcounts_and_warns_on_wipe(
             app_id=test_app_id,
             start_date=window,
             end_date=window,
+            allow_wipe=True,
         )

@@ -310,12 +310,24 @@ def load_events(
     app_id: str,
     start_date: datetime.date,
     end_date: datetime.date,
+    allow_wipe: bool = False,
 ) -> int:
     """Idempotently load one (app_id, attribution_type, date-range) partition.
 
     Deletes any existing rows in the exact window this call owns, then bulk-
     inserts `rows`, all inside one transaction — safe to re-run for the same
     window (backfill chunk retries, daily re-runs) without duplicating data.
+
+    BAF-11 stage 5 (issue #45): an EMPTY `rows` against a window that already
+    holds data is refused with `PipelineError` unless `allow_wipe=True`.
+    AppsFlyer answers a window past its availability floor -- and some
+    upstream hiccups -- with a valid, header-only empty report, which
+    delete-then-insert would otherwise turn into the silent erasure of the
+    only copy of that window (our table) at exit 0. A genuinely quiet window
+    (nothing loaded before, nothing fetched now) is still a no-op; the guard
+    only bites when there is something to lose. `allow_wipe=True` is the
+    deliberate escape hatch for operator cleanup and test teardown, and keeps
+    issue #10's "wiped" WARNING.
     """
     table_name = _validate_identifier(table_name)
     window_column = _validate_identifier(spec.window_column)
@@ -332,17 +344,41 @@ def load_events(
     placeholders_sql = ", ".join(f":{c}" for c in spec.insert_columns)
     insert_stmt = text(f"INSERT INTO `{table_name}` ({columns_sql}) VALUES ({placeholders_sql})")
 
+    count_stmt = text(
+        f"SELECT COUNT(*) FROM `{table_name}` "
+        "WHERE app_id = :app_id AND attribution_type = :attribution_type "
+        f"AND `{window_column}` >= :window_start AND `{window_column}` < :window_end"
+    )
+    window_params = {
+        "app_id": app_id,
+        "attribution_type": attribution_type,
+        "window_start": window_start,
+        "window_end": window_end,
+    }
+
     try:
         with engine.begin() as conn:
-            deleted = conn.execute(
-                delete_stmt,
-                {
-                    "app_id": app_id,
-                    "attribution_type": attribution_type,
-                    "window_start": window_start,
-                    "window_end": window_end,
-                },
-            ).rowcount
+            if not rows and not allow_wipe:
+                existing = int(conn.execute(count_stmt, window_params).scalar_one())
+                if existing > 0:
+                    logger.warning(
+                        "refusing to wipe populated window: app_id=%s attribution_type=%s "
+                        "window=[%s, %s] existing=%d fetched=0 -- an empty report for a window "
+                        "that already holds rows is issue #45's shape (past AppsFlyer's "
+                        "availability floor, or an upstream anomaly); rows left untouched",
+                        app_id,
+                        attribution_type,
+                        start_date,
+                        end_date,
+                        existing,
+                    )
+                    raise PipelineError(
+                        f"refusing to wipe populated window `{table_name}` for app_id={app_id!r} "
+                        f"attribution_type={attribution_type!r} window=[{start_date}, {end_date}]: "
+                        f"fetched 0 rows but {existing} already loaded (issue #45); re-run once "
+                        "the source returns data, or pass allow_wipe=True to erase deliberately"
+                    )
+            deleted = conn.execute(delete_stmt, window_params).rowcount
             if rows:
                 conn.execute(insert_stmt, rows)
     except SQLAlchemyError as exc:
