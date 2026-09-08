@@ -139,9 +139,14 @@ Branch/PR numbering below is this ticket's own (`baf-11-stage-N-<slug>`, indepen
    #35), RUNBOOK §9 rewritten around the real availability/quota model and §15 added with the
    cutover procedure — done, `baf-11-stage-5-cutover-safety`.
 
-Not started: Этап 7 (prod PK/index migration — a one-off `ALTER`, RUNBOOK §15 step 5 — confirmed
-required 2026-09-08, see `docs/2026-09-08-production-audit.md`), Этап 9
-(the cutover itself — RUNBOOK §15), Этап 10 (acceptance — §15 step 4). Deliberately not done:
+6. RUNBOOK §15 Day D provisioning (steps 3-5) — `appsflyer_installs_fb` created via `create-table`;
+   Этап 7's `sql/migrations/2026-07-08-add-id-pk-and-index.sql` run against production
+   `appsflyer_events_fb` (row count verified identical before/after, `SHOW INDEX` now lists
+   `PRIMARY (id)` + `idx_app_attr_time`) — done 2026-09-08, `baf-11-day-d-provision`, see the
+   follow-up section of `docs/2026-09-08-production-audit.md`. Day D (steps 0-7) is now fully closed.
+
+Not started: Этап 9 (the cutover itself — RUNBOOK §15 Day D+1/D+2, gated on Mark's go-ahead),
+Этап 10 (acceptance — §15 step 4). Deliberately not done:
 Этап 4's streaming loader/transform (a full-mode day is ~25k rows, a full backfill under 1M — see
 the 2026-08-13 measurement) and a real alerting backend (issue #16, stub kept by decision
 2026-09-07).

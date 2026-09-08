@@ -472,6 +472,12 @@ Pull API scripts on days D..D+2 (UI exports are fine, separate quota).
 
 ### Day D — deploy the new code with the OLD behavior ("parallel", Mark's condition)
 
+> **Status: all of Day D (steps 0-7) done as of 2026-09-08.** Steps 0-2 were found already live by
+> the same-day audit; steps 3-5 were executed the same day (branch `baf-11-day-d-provision`, see the
+> follow-up section in `docs/2026-09-08-production-audit.md`); steps 6-7 needed no action (unit
+> already had `TimeoutStartSec=7200` live, so nothing to reinstall or re-verify). Day D+1 below is
+> still gated on Mark's go-ahead.
+
 0. **Capture the pre-cutover baseline and audit the live state first — do this before touching
    anything.** Record the deployed commit, 60 days of `journalctl` history, whether the filter keys
    are present in the `EnvironmentFile` (names/presence only, never values, in anything that reaches
@@ -489,15 +495,19 @@ Pull API scripts on days D..D+2 (UI exports are fine, separate quota).
    everything else as they are.
 2. `cd ~/GitHubRepos/appsflyer-to-analytics-db && git pull && ~/.local/bin/uv sync --frozen --no-dev`
 3. Preflight through systemd (§14 pattern, quota 0): `check-connection` → two table lines, the
-   installs one "does not exist yet".
+   installs one "does not exist yet". **Done 2026-09-08** — confirmed exactly this output before
+   proceeding.
 4. **[write, DDL]** `create-table` through the same pattern → creates `appsflyer_installs_fb`
-   (130 columns, `idx_app_attr_install`). Idempotent.
+   (130 columns, `idx_app_attr_install`). Idempotent. **Done 2026-09-08** — `check-connection`
+   afterward showed both tables "exists" (`appsflyer_installs_fb` at 0 rows, not yet written to).
 5. **[write, DDL]** Этап 7: run `sql/migrations/2026-07-08-add-id-pk-and-index.sql` once against
    `appsflyer_events_fb`. **Confirmed necessary as of 2026-09-08** — `SHOW INDEX` returned empty and
    `SHOW CREATE TABLE` has no `id`/PRIMARY KEY/index clause at all; the 2026-07-10 recreation did drop
    them, and issue #14's 2026-07-08 "verified live" comment no longer reflects reality. `power_bi_user`
    holds `INDEX, ALTER` (re-verified 2026-09-08 via `SHOW GRANTS`). Verify:
-   `SHOW INDEX FROM appsflyer_events_fb` lists `idx_app_attr_time`.
+   `SHOW INDEX FROM appsflyer_events_fb` lists `idx_app_attr_time`. **Done 2026-09-08** — row count
+   verified identical before/after (`12132` → `12132`); `SHOW INDEX` now lists `PRIMARY (id)` and
+   `idx_app_attr_time`.
 6. Install the updated unit (`TimeoutStartSec=7200` — already live as of 2026-09-08, so this step may
    already be a no-op; check the installed unit file first):
    `cp deploy/user-level/appsflyer-daily.service ~/.config/systemd/user/ && systemctl --user daemon-reload`
