@@ -13,12 +13,15 @@ Placeholders used throughout — adjust to your environment:
 | secrets file | `/etc/appsflyer/appsflyer.env` | mode-600 systemd `EnvironmentFile` |
 | deploy user (no-root stopgap, §14) | `<deploy-user>` | existing personal account used when root isn't available yet |
 
-> **Current live status (2026-07-07):** the pipeline is deployed and running on the target analytics
-> server — but via the **no-root stopgap** in §14 below, not the root-based setup §§1-13 describe.
-> `<deploy-user>` doesn't have sudo on that box yet (a request is in with the backend team); everything
-> below this point assumes root is available. Read §14 first if you're picking this up before that's
-> resolved. (Real host/access details for this deployment are kept out of this public repo — ask
-> whoever owns BAF-2 if you need them.)
+> **Current live status (2026-09-08, see `docs/2026-09-08-production-audit.md` for full detail):** the
+> pipeline is deployed and running on the target analytics server via the **no-root stopgap** in §14
+> below, not the root-based setup §§1-13 describe. `<deploy-user>` still has no sudo on that box (a
+> request is in with the backend team); everything below this point assumes root is available. Read
+> §14 first if you're picking this up before that's resolved. Deployed commit is `main` HEAD
+> (verified live 2026-09-08); §15 Day D steps 1-2 are done (filters and `DB_TABLE_INSTALLS` already in
+> the `EnvironmentFile`, code pulled and running clean), steps 3-7 are outstanding — see §15 step 0.
+> (Real host/access details for this deployment are kept out of this public repo — ask whoever owns
+> BAF-2 if you need them.)
 
 ## 0. Overview
 
@@ -469,6 +472,18 @@ Pull API scripts on days D..D+2 (UI exports are fine, separate quota).
 
 ### Day D — deploy the new code with the OLD behavior ("parallel", Mark's condition)
 
+0. **Capture the pre-cutover baseline and audit the live state first — do this before touching
+   anything.** Record the deployed commit, 60 days of `journalctl` history, whether the filter keys
+   are present in the `EnvironmentFile` (names/presence only, never values, in anything that reaches
+   this public repo), `SHOW INDEX FROM appsflyer_events_fb`, and the per-day Facebook-purchase
+   count/revenue baseline that step 10 below needs and cannot reconstruct afterwards (the table is the
+   only copy of anything older than the availability floor). Commit the write-up as a dated file under
+   `docs/`; keep the baseline's row-level detail out of the public repo (commercially sensitive) —
+   store it under `~/appsflyer-secrets/` instead, per §14's existing convention for keeping sensitive
+   material outside the git working directory. See `docs/2026-09-08-production-audit.md` for the
+   template and the 2026-09-08 run's results (which also found: production was *already* on `main`
+   HEAD by that date, and `appsflyer_events_fb` has **no PRIMARY KEY and no index at all** — settling
+   the Этап 7 dispute against issue #14's "verified live" comment).
 1. **[write]** Add the one new required key to `~/appsflyer-secrets/appsflyer.env` **before**
    pulling (§5): `DB_TABLE_INSTALLS=appsflyer_installs_fb`. Leave the two filter lines and
    everything else as they are.
@@ -478,14 +493,22 @@ Pull API scripts on days D..D+2 (UI exports are fine, separate quota).
 4. **[write, DDL]** `create-table` through the same pattern → creates `appsflyer_installs_fb`
    (130 columns, `idx_app_attr_install`). Idempotent.
 5. **[write, DDL]** Этап 7: run `sql/migrations/2026-07-08-add-id-pk-and-index.sql` once against
-   `appsflyer_events_fb` (the production table was recreated on 2026-07-10 without its PK/index —
-   §6). `power_bi_user` holds `INDEX, ALTER` (verified 2026-08-13). Verify:
+   `appsflyer_events_fb`. **Confirmed necessary as of 2026-09-08** — `SHOW INDEX` returned empty and
+   `SHOW CREATE TABLE` has no `id`/PRIMARY KEY/index clause at all; the 2026-07-10 recreation did drop
+   them, and issue #14's 2026-07-08 "verified live" comment no longer reflects reality. `power_bi_user`
+   holds `INDEX, ALTER` (re-verified 2026-09-08 via `SHOW GRANTS`). Verify:
    `SHOW INDEX FROM appsflyer_events_fb` lists `idx_app_attr_time`.
-6. Install the updated unit (`TimeoutStartSec=7200`):
+6. Install the updated unit (`TimeoutStartSec=7200` — already live as of 2026-09-08, so this step may
+   already be a no-op; check the installed unit file first):
    `cp deploy/user-level/appsflyer-daily.service ~/.config/systemd/user/ && systemctl --user daemon-reload`
-7. **Run nothing by hand.** The next scheduled fire (D+1, 05:00) is the test: new code, old
-   filters, expect `4/4 windows OK` and a `filters: media_source=Facebook Ads, event_names=...`
-   line in `journalctl --user -u appsflyer-daily.service`. Quota spent: the usual 1 per combo.
+7. **Finish with one real `systemctl --user start appsflyer-daily.service`.** This resolves the
+   apparent conflict with §14's rule (`docs/RUNBOOK.md` §14, "verification gap" callout below step 14):
+   after any unit-file change, a transient `systemd-run` preflight does **not** exercise the installed
+   unit's hardening directives, so it can pass while the real unit is unstartable (issue #19's
+   `218/CAPABILITIES` incident happened exactly this way, on an unattended scheduled fire). §14's rule
+   takes precedence here — do not defer the first real start to the next scheduled fire. Expect
+   `4/4 windows OK` and old-filter behavior (no `filters:` WARNING line — the filter keys are already
+   set per step 0's audit). Quota spent: the usual 1 per combo.
 
 ### Day D+1 — flip, then backfill once
 

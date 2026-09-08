@@ -81,7 +81,8 @@ matching the stage numbering below.
 5. Orchestration + CLI (`backfill`/`daily`, `--dry-run`, `--start-date`/`--end-date`/`--date`) —
    done, verified live: a real `daily` run loaded 136 rows, re-running was idempotent (still 136),
    dry-run previews never write
-6. Tests + CI green — done: 68 tests, 99% branch coverage (`branch = true`, gated at
+6. Tests + CI green — done: 68 tests at the time (188 as of 2026-09-08, after BAF-11), 99% branch
+   coverage (`branch = true`, gated at
    `--cov-fail-under=98` in CI only); CI's lint/format/type steps consolidated into one
    `pre-commit run --all-files` step so the pre-commit config is continuously verified instead of
    sitting unexercised
@@ -138,7 +139,8 @@ Branch/PR numbering below is this ticket's own (`baf-11-stage-N-<slug>`, indepen
    #35), RUNBOOK §9 rewritten around the real availability/quota model and §15 added with the
    cutover procedure — done, `baf-11-stage-5-cutover-safety`.
 
-Not started: Этап 7 (prod PK/index migration — a one-off `ALTER`, RUNBOOK §15 step 2), Этап 9
+Not started: Этап 7 (prod PK/index migration — a one-off `ALTER`, RUNBOOK §15 step 5 — confirmed
+required 2026-09-08, see `docs/2026-09-08-production-audit.md`), Этап 9
 (the cutover itself — RUNBOOK §15), Этап 10 (acceptance — §15 step 4). Deliberately not done:
 Этап 4's streaming loader/transform (a full-mode day is ~25k rows, a full backfill under 1M — see
 the 2026-08-13 measurement) and a real alerting backend (issue #16, stub kept by decision
