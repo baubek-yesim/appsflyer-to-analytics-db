@@ -91,6 +91,26 @@ per §0's existing convention — ask whoever owns BAF-2 for them.
   did **not** independently confirm the migration was run, only that the current row count of
   coarse-key conflicts is small and explainable by known WARNINGs.
 
+## Follow-up (2026-09-08, same day): §15 steps 3-5 executed
+
+Both DB-only gaps this audit found were closed the same day, on branch `baf-11-day-d-provision`:
+
+- **`create-table`** run via the same `systemd-run --user` preflight pattern. `appsflyer_events_fb`
+  unaffected ("is ready", `CREATE TABLE IF NOT EXISTS` no-op); `appsflyer_installs_fb` created
+  (130 columns, 0 rows — not yet written to, since `APPSFLYER_ENABLED_REPORTS` still excludes
+  installs). Confirmed via `check-connection`: both tables now report "exists".
+- **Этап 7 ALTER** (`sql/migrations/2026-07-08-add-id-pk-and-index.sql`) run against
+  `appsflyer_events_fb` as `power_bi_user`. Row count identical before/after (`12132` → `12132`,
+  matching the same verification pattern issue #14 used on 2026-07-08). `SHOW INDEX` now lists
+  `PRIMARY (id)` and `idx_app_attr_time (app_id, attribution_type, event_time)`.
+- `appsflyer-daily.timer` unaffected throughout — `list-timers` still shows the same next fire
+  (`2026-09-09 05:04:42`), no unit file was touched, no service was manually started.
+
+§15 Day D (steps 1-7) is now **fully done**: steps 1-2 were already live per the audit above, 3-5 are
+closed by this follow-up, and 6-7 were already satisfied (`TimeoutStartSec=7200` live, timer firing
+clean daily) with no unit change to re-verify. Only Day D+1 (the filter flip, gated on Mark's
+go-ahead per the BAF-11 Jira thread) and Day D+2/Этап 10 remain.
+
 ## What this changes about the state assessed on 2026-09-08 (workflow audit, same day)
 
 - Production is **not** 57 commits behind `main` — it is caught up. §15 steps 1-2 (add
